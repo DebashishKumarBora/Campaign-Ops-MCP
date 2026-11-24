@@ -1,0 +1,38 @@
+{
+  "name": "campaign-ops-mcp",
+  "version": "0.1.0",
+  "description": "An MCP server that lets AI agents change Google Ads campaigns safely: propose, dry run, human approval, apply, verify, rollback, with Fair Housing guardrails and a tamper-evident audit log.",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "author": "Debashish Kumar Bora",
+  "homepage": "https://github.com/debashishkumarbora/campaign-ops-mcp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/debashishkumarbora/campaign-ops-mcp.git"
+  },
+  "keywords": ["mcp", "model-context-protocol", "ai-agents", "google-ads", "human-in-the-loop", "guardrails", "fair-housing"],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "bin": {
+    "campaign-ops-mcp": "dist/src/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/index.js",
+    "test": "npm run build && node scripts/run-tests.mjs",
+    "demo": "npm run build && node dist/scripts/demo.js",
+    "console": "node dist/scripts/console.js",
+    "reset": "node dist/scripts/reset.js",
+    "inspect": "npx -y @modelcontextprotocol/inspector node dist/src/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "~5.9.3"
+  }
+}
