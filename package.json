@@ -6,12 +6,20 @@
   "type": "module",
   "license": "MIT",
   "author": "Debashish Kumar Bora",
-  "homepage": "https://github.com/debashishkumarbora/campaign-ops-mcp",
+  "homepage": "https://debashishkumarbora.github.io/campaign-ops/",
   "repository": {
     "type": "git",
     "url": "https://github.com/debashishkumarbora/campaign-ops-mcp.git"
   },
-  "keywords": ["mcp", "model-context-protocol", "ai-agents", "google-ads", "human-in-the-loop", "guardrails", "fair-housing"],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai-agents",
+    "google-ads",
+    "human-in-the-loop",
+    "guardrails",
+    "fair-housing"
+  ],
   "engines": {
     "node": ">=20.11"
   },
@@ -25,7 +33,8 @@
     "demo": "npm run build && node dist/scripts/demo.js",
     "console": "node dist/scripts/console.js",
     "reset": "node dist/scripts/reset.js",
-    "inspect": "npx -y @modelcontextprotocol/inspector node dist/src/index.js"
+    "inspect": "npx -y @modelcontextprotocol/inspector node dist/src/index.js",
+    "build:web": "node scripts/build-web.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
@@ -33,6 +42,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
+    "esbuild": "^0.28.2",
     "typescript": "~5.9.3"
   }
 }

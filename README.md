@@ -2,6 +2,8 @@
 
 **Lets AI agents change Google Ads campaigns safely.** Every change is proposed, checked, dry-run, approved by a person, applied, verified and reversible, with Fair Housing guardrails and a tamper-evident audit log.
 
+**[Try the live demo](https://debashishkumarbora.github.io/campaign-ops/)**: the real engine, compiled to run in your browser on a fictional sandbox account. Approve the agent's fixes, then try to make it misbehave.
+
 ![The Campaign Ops approval console: a budget change shown as a redline, with every check listed beside the Approve button](docs/approval-console.png)
 
 ## Why this exists
@@ -81,6 +83,16 @@ This opens the console in your browser with your key. Proposals appear within a 
 
 The console listens on `127.0.0.1` only, requires a key the AI never sees, checks the Host header (DNS rebinding), refuses cross-site requests, escapes everything the AI writes, and runs under a strict Content Security Policy.
 
+## The browser demo
+
+The live demo runs the same engine, sandbox, diagnostics and Fair Housing code as the MCP server. `scripts/build-web.mjs` bundles them with esbuild and swaps only Node's file system, path and hashing modules for small in-memory versions (`web/shims`), so every guardrail behaves exactly as it does in Node. SHA-256 output matches Node byte for byte.
+
+```bash
+npm run build:web   # writes web/site/engine.js
+```
+
+`web/site` is a static site (HTML, CSS, JS). Host it anywhere, for example GitHub Pages.
+
 ## Connect an AI client
 
 Campaign Ops runs as a local (stdio) MCP server. Point your MCP client at the built entry file:
@@ -154,6 +166,8 @@ Section 804(c) of the Fair Housing Act prohibits housing ads that state a prefer
 ## Roadmap
 
 - [x] **Milestone 1:** governance engine, sandbox account, approval console, 28 tests
+- [x] **Connected to Claude Desktop:** a real session found the problems, waited for approval, applied and verified three fixes
+- [x] **Public browser demo** of the real engine, with a replay of the Claude session
 - [ ] **Milestone 2:** approval card inside the chat with [MCP Apps](https://blog.modelcontextprotocol.io/posts/2026-01-26-mcp-apps/)
 - [ ] **Milestone 3:** Google Ads test-account backend (real API calls, no ads served, no spend)
 - [ ] **Milestone 4:** public sandbox as a remote MCP server on Cloudflare Workers
@@ -177,6 +191,7 @@ src/
     sandbox.ts, seed.ts Synthetic account with planted problems
   console/server.ts     Approval console HTTP server
 console-ui/             Console page (plain HTML, CSS, JS)
+web/                    Browser build: entry, Node shims, and the static demo site
 scripts/                demo, console, reset, test runner
 test/                   node:test suites
 ```
