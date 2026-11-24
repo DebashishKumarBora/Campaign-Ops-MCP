@@ -91,7 +91,7 @@ The live demo runs the same engine, sandbox, diagnostics and Fair Housing code a
 npm run build:web   # writes web/site/engine.js
 ```
 
-`web/site` is a static site (HTML, CSS, JS). Host it anywhere, for example GitHub Pages.
+`web/site` is a static site (HTML, CSS, JS). Host it anywhere, for example GitHub Pages. Add `?embed=app` to the address for a compact app view with only the workspace and a Replay tab, which is how the portfolio's phone app shows it.
 
 ## Connect an AI client
 
