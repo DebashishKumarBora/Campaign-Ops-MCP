@@ -201,7 +201,7 @@ Section 804(c) of the Fair Housing Act prohibits housing ads that state a prefer
 - [x] **Connected to Claude Desktop:** a real session found the problems, waited for approval, applied and verified three fixes
 - [x] **Public browser demo** of the real engine, with a replay of the Claude session
 - [ ] **Milestone 2:** approval card inside the chat with [MCP Apps](https://blog.modelcontextprotocol.io/posts/2026-01-26-mcp-apps/)
-- [ ] **Milestone 3:** Google Ads test-account backend (real API calls, no ads served, no spend). Built and tested against a simulated API; first live run next
+- [x] **Milestone 3:** Google Ads test-account backend (real API calls, no ads served, no spend). Live run done: Claude found a Fair Housing problem in a real Google Ads test account, a person approved the fix, and the agent rewrote the ad through the Google Ads API
 - [ ] **Milestone 4:** public sandbox as a remote MCP server on Cloudflare Workers
 - [ ] **Milestone 5:** daily autopilot that runs diagnostics and queues proposals for approval
 - [ ] **Milestone 6:** evaluation suite that scores agent runs for safe behavior
