@@ -24,6 +24,8 @@ async function connect(dataDir: string, opts: { scope?: string; elicit?: ElicitH
       CAMPAIGN_OPS_SCOPE: opts.scope ?? 'execute',
       CAMPAIGN_OPS_KILL_SWITCH: '0',
       CAMPAIGN_OPS_POLICY_FILE: 'no-such-policy-file.json',
+      // keep tests independent of a Google Ads connection on this computer
+      CAMPAIGN_OPS_GOOGLE_ADS: 'off',
     },
     stderr: 'pipe',
   });

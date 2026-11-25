@@ -122,6 +122,7 @@ export function startConsole(opts: ConsoleOptions): Promise<ConsoleHandle> {
           app: { name: 'Campaign Ops', version: opts.version },
           mode: backend.mode,
           account: accounts[0] ?? null,
+          accounts,
           scope: engine.scope,
           killSwitch: engine.killSwitchState(),
           policy: engine.policy,

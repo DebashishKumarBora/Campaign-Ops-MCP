@@ -4,6 +4,9 @@ import { UserError } from '../types.js';
 import { categoryLabel, lintAd, protectedTermIn } from './fairHousing.js';
 import { money, round2, share } from '../util/format.js';
 
+export const GOOGLE_ADS_TEST_NOTE =
+  'Google Ads test account: campaigns, budgets, keywords and ads are real, and every change goes to Google. Performance numbers (spend, clicks, leads, search terms) are simulated, because test accounts never show ads.';
+
 /**
  * Deterministic diagnostics. The tools do the math so the AI can focus on
  * judgment and explanation, and so results are the same on every run.
@@ -222,5 +225,6 @@ export async function runDiagnostics(backend: AdsBackend, policy: Policy, accoun
     'Suggested changes are starting points. Each one still goes through policy checks, a dry run and human approval.',
   ];
   if (overview.account.mode === 'sandbox') notes.unshift('Sandbox account: all data is synthetic.');
+  if (overview.account.mode === 'google_ads_test') notes.unshift(GOOGLE_ADS_TEST_NOTE);
   return { overview, findings, protectedTermsNotNegated: protectedTerms, notes };
 }

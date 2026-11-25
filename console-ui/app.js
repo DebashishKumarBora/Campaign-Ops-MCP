@@ -159,6 +159,33 @@
       .join('')}</ul>`;
   }
 
+  const MODE_LABELS = { sandbox: 'Sandbox data', google_ads_test: 'Google Ads test', google_ads: 'Google Ads live' };
+
+  function allAccounts(d) {
+    return Array.isArray(d.accounts) ? d.accounts : d.account ? [d.account] : [];
+  }
+
+  function accountsHtml(d) {
+    return allAccounts(d)
+      .map((a) => `<span class="acct"><span class="mode mode-${esc(a.mode)}">${esc(MODE_LABELS[a.mode] || a.mode)}</span><span>${esc(a.name)}</span></span>`)
+      .join('');
+  }
+
+  function footNote(d) {
+    const modes = allAccounts(d).map((a) => a.mode);
+    const bits = [];
+    if (modes.includes('sandbox')) bits.push('Sandbox data is synthetic.');
+    if (modes.includes('google_ads_test')) bits.push('Google Ads test accounts never show ads; their performance numbers are simulated.');
+    return bits.length ? bits.join(' ') + ' ' : '';
+  }
+
+  function accountPrefix(p) {
+    const list = S.data ? allAccounts(S.data) : [];
+    if (list.length < 2) return '';
+    const a = list.find((x) => x.id === p.accountId);
+    return `<span class="acct-tag">${esc(a ? a.name : p.accountId)}</span> `;
+  }
+
   function confirmFor(act, id) {
     return S.confirm && S.confirm.act === act && S.confirm.id === id;
   }
@@ -174,7 +201,7 @@
         <span class="grow"></span>
         ${riskTag(p.risk)}
       </div>
-      <p class="target">${esc(p.targetLabel)}</p>
+      <p class="target">${accountPrefix(p)}${esc(p.targetLabel)}</p>
       ${redline(p)}
       ${p.change.type === 'set_campaign_status' ? `<p class="summary">${esc(p.summary)}</p>` : ''}
       <p class="why">${esc(p.reason)}</p>
@@ -349,7 +376,7 @@
       <header class="bar">
         <div class="bar-inner">
           <div class="brand"><span class="brand-name">Campaign Ops</span><span class="brand-sub">Approval console</span></div>
-          <div class="account">${d.mode === 'sandbox' ? '<span class="mode">Sandbox data</span>' : ''}<span>${esc(d.account ? d.account.name : '')}</span></div>
+          <div class="account">${accountsHtml(d)}</div>
           <div class="switch">${switchHtml}</div>
         </div>
       </header>
@@ -378,7 +405,7 @@
             </section>
           </div>
         </div>
-        <p class="foot">Campaign Ops ${esc(d.app.version)}. Scope: ${esc(d.scope)}. ${d.mode === 'sandbox' ? 'Sandbox data is synthetic. ' : ''}Fair Housing checks are a screening aid, not legal advice.</p>
+        <p class="foot">Campaign Ops ${esc(d.app.version)}. Scope: ${esc(d.scope)}. ${footNote(d)}Fair Housing checks are a screening aid, not legal advice.</p>
       </main>`;
   }
 

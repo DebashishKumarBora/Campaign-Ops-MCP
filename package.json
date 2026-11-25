@@ -1,7 +1,7 @@
 {
   "name": "campaign-ops-mcp",
-  "version": "0.1.0",
-  "description": "An MCP server that lets AI agents change Google Ads campaigns safely: propose, dry run, human approval, apply, verify, rollback, with Fair Housing guardrails and a tamper-evident audit log.",
+  "version": "0.2.0",
+  "description": "An MCP server that lets AI agents change Google Ads campaigns safely: propose, dry run, human approval, apply, verify, rollback, with Fair Housing guardrails and a tamper-evident audit log. Works on a sandbox or a real Google Ads test account.",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -34,6 +34,8 @@
     "console": "node dist/scripts/console.js",
     "reset": "node dist/scripts/reset.js",
     "inspect": "npx -y @modelcontextprotocol/inspector node dist/src/index.js",
+    "gads:check": "npm run build && node dist/scripts/gads-check.js",
+    "gads:setup": "npm run build && node dist/scripts/gads-setup.js",
     "build:web": "node scripts/build-web.mjs"
   },
   "dependencies": {

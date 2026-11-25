@@ -4,6 +4,8 @@
 
 **[Try the live demo](https://debashishkumarbora.github.io/campaign-ops/)**: the real engine, compiled to run in your browser on a fictional sandbox account. Approve the agent's fixes, then try to make it misbehave.
 
+It runs on a built-in sandbox, or on a **real Google Ads test account** through the Google Ads API (real campaigns and API calls, no ads served, no spend).
+
 ![The Campaign Ops approval console: a budget change shown as a redline, with every check listed beside the Approve button](docs/approval-console.png)
 
 ## Why this exists
@@ -58,7 +60,7 @@ Requires [Node.js](https://nodejs.org) 22 or newer (any current LTS) and Git.
 git clone https://github.com/debashishkumarbora/campaign-ops-mcp.git
 cd campaign-ops-mcp
 npm install
-npm test        # 28 tests: guardrails, lifecycle, console security, MCP over stdio
+npm test        # 48 tests: guardrails, lifecycle, console security, MCP over stdio, Google Ads API
 npm run demo    # a narrated run through every guardrail
 ```
 
@@ -110,6 +112,33 @@ Campaign Ops runs as a local (stdio) MCP server. Point your MCP client at the bu
 
 On Windows, use a path like `E:\\campaign-ops-mcp\\dist\\src\\index.js`. Then ask: *"Run a health check on my ad account and propose fixes."* The server also ships two prompts, `account_health_check` and `fix_wasted_spend`.
 
+## Connect a Google Ads test account
+
+Campaign Ops can work on a real Google Ads **test account**: real campaigns, real API calls and Google's own dry run, in an account that can never show ads or spend money.
+
+1. In [Google Cloud](https://console.cloud.google.com), create a project and enable the **Google Ads API**. New projects start with **Test** access, which only works with test accounts. Keep it that way.
+2. In the same project, create a service account and download its JSON key. Save it as `~/campaign-ops-secrets/google-ads-key.json`, outside this folder so it can never be committed.
+3. Create a [Google Ads test manager account](https://developers.google.com/google-ads/api/docs/first-call/test-accounts). Under **Admin > Access and security > Users**, add the service account email with **Standard** access.
+4. Run:
+
+```bash
+npm run gads:check -- 724-800-0350   # your test manager account number
+npm run gads:setup                   # creates "Demo Apartments" and builds the sample campaigns
+```
+
+5. Restart your MCP client. `list_accounts` now shows the sandbox and the test account side by side, and the approval console labels which account each change is for.
+
+No developer token is needed: since September 2026, Google Ads API access belongs to the Cloud project.
+
+| | Google Ads test account |
+|---|---|
+| Campaigns, budgets, statuses, negative keywords, ad copy | Real: read from and written to Google Ads |
+| Dry run | Google's own `validateOnly` |
+| Verification | Read back from Google after every change |
+| Spend, clicks, leads, search terms | Simulated, because test accounts never serve ads. Every report says so. |
+
+Before any change, Campaign Ops asks Google whether the account is a test account and refuses if it is not. With Test access, Google also blocks real accounts on its side. `npm run gads:setup -- --fresh` rebuilds the sample campaigns.
+
 ## Tools
 
 | Tool | What it does | Scope |
@@ -139,6 +168,9 @@ Copy `.env.example` to `.env` to change settings, and edit `policy.json` to chan
 | `CAMPAIGN_OPS_KILL_SWITCH` | `0` | `1` refuses every change |
 | `CAMPAIGN_OPS_DATA_DIR` | `./data` | Where state lives |
 | `CAMPAIGN_OPS_POLICY_FILE` | `./policy.json` | Alternative policy file |
+| `CAMPAIGN_OPS_GOOGLE_ADS` | on when set up | `off` hides the Google Ads account |
+| `CAMPAIGN_OPS_SECRETS_DIR` | `~/campaign-ops-secrets` | Where the robot key and Google Ads connection settings live |
+| `GOOGLE_ADS_API_VERSION` | `v26` | Google Ads API version |
 
 `npm run reset` rebuilds the sandbox and clears proposals and the audit log.
 
@@ -169,7 +201,7 @@ Section 804(c) of the Fair Housing Act prohibits housing ads that state a prefer
 - [x] **Connected to Claude Desktop:** a real session found the problems, waited for approval, applied and verified three fixes
 - [x] **Public browser demo** of the real engine, with a replay of the Claude session
 - [ ] **Milestone 2:** approval card inside the chat with [MCP Apps](https://blog.modelcontextprotocol.io/posts/2026-01-26-mcp-apps/)
-- [ ] **Milestone 3:** Google Ads test-account backend (real API calls, no ads served, no spend)
+- [ ] **Milestone 3:** Google Ads test-account backend (real API calls, no ads served, no spend). Built and tested against a simulated API; first live run next
 - [ ] **Milestone 4:** public sandbox as a remote MCP server on Cloudflare Workers
 - [ ] **Milestone 5:** daily autopilot that runs diagnostics and queues proposals for approval
 - [ ] **Milestone 6:** evaluation suite that scores agent runs for safe behavior
@@ -189,10 +221,12 @@ src/
   backends/
     backend.ts          The ad platform interface
     sandbox.ts, seed.ts Synthetic account with planted problems
+    router.ts           Sandbox and Google Ads accounts side by side
+    googleAds/          Google Ads API: robot login, REST client, backend, sample campaigns
   console/server.ts     Approval console HTTP server
 console-ui/             Console page (plain HTML, CSS, JS)
 web/                    Browser build: entry, Node shims, and the static demo site
-scripts/                demo, console, reset, test runner
+scripts/                demo, console, reset, gads:check, gads:setup, test runner
 test/                   node:test suites
 ```
 

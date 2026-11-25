@@ -18,7 +18,7 @@ How to work:
 4. After proposing, call apply_change. It applies the change only if a person has approved it, then verifies the result.
 5. Never say a change is live until apply_change returns status "applied" with verification "passed".
 6. If a proposal is blocked, read the failed checks and adjust. Never try to work around Fair Housing or policy blocks, and never re-word a protected-group exclusion to slip past the check.
-7. If get_policy shows mode "sandbox", all data is synthetic.`;
+7. Check each account's mode in list_accounts. "sandbox" means all data is synthetic. "google_ads_test" means a real Google Ads test account: campaigns, budgets, keywords and ads are real and every change goes to Google, but performance numbers are simulated because test accounts never show ads. Say this when you report numbers for that account.`;
 
 type Json = Record<string, unknown>;
 
@@ -194,7 +194,7 @@ export function createMcpServer(deps: ServerDeps): McpServer {
 
   mcp.registerTool(
     'list_accounts',
-    { title: 'List accounts', description: 'Lists the ad accounts this server can reach, with their mode (sandbox or live).', inputSchema: {}, annotations: READ },
+    { title: 'List accounts', description: 'Lists the ad accounts this server can reach, with their mode: sandbox (synthetic data), google_ads_test (a real Google Ads test account with simulated performance numbers) or google_ads (live).', inputSchema: {}, annotations: READ },
     () =>
       guard(async () => {
         const accounts = await backend.listAccounts();
@@ -332,8 +332,10 @@ export function createMcpServer(deps: ServerDeps): McpServer {
     () =>
       guard(async () => {
         const kill = engine.killSwitchState();
+        const accounts = await backend.listAccounts();
         return ok('Current guardrails.', {
           mode: backend.mode,
+          accounts: accounts.map((a) => ({ id: a.id, name: a.name, mode: a.mode })),
           scope: engine.scope,
           kill_switch: kill.on,
           kill_switch_forced_by_environment: kill.forcedByEnv,

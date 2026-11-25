@@ -12,6 +12,6 @@ const dir = app.config.dataDir;
 for (const file of ['proposals.json', 'audit.jsonl', 'control.json', '.lock']) {
   fs.rmSync(path.join(dir, file), { force: true });
 }
-app.backend.reset();
+app.sandbox.reset();
 console.log(`Sandbox reset in ${dir}`);
 console.log('Fresh synthetic account created. Proposals, audit log and kill switch cleared. Console key kept.');

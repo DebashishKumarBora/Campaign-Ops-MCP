@@ -53,6 +53,7 @@ async function main(): Promise<void> {
 
   await mcp.connect(new StdioServerTransport());
   log(`Ready. Mode: ${app.backend.mode}. Scope: ${config.scope}. Policy: ${config.policySource}. Data: ${config.dataDir}`);
+  log(app.googleAdsStatus.message);
 }
 
 main().catch((e) => {

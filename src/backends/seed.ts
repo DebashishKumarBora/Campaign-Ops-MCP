@@ -51,7 +51,7 @@ function poisson(lambda: number, rand: () => number): number {
   return k - 1;
 }
 
-interface CampaignSpec {
+export interface CampaignSpec {
   id: string;
   community: string;
   name: string;
@@ -64,7 +64,7 @@ interface CampaignSpec {
   lostIs: number; // search impression share lost to budget
 }
 
-const SPECS: CampaignSpec[] = [
+export const SPECS: CampaignSpec[] = [
   { id: 'c-101', community: 'Juniper Yard', name: 'Juniper Yard | Search | Brand', channel: 'SEARCH', budget: 30, spendRate: 0.62, cpc: 1.9, cvr: 0.16, ctr: 0.11, lostIs: 0.02 },
   { id: 'c-102', community: 'Juniper Yard', name: 'Juniper Yard | Search | Generic', channel: 'SEARCH', budget: 60, spendRate: 0.97, cpc: 3.4, cvr: 0.045, ctr: 0.05, lostIs: 0.08 },
   { id: 'c-201', community: 'Northlight Lofts', name: 'Northlight Lofts | Search | Brand', channel: 'SEARCH', budget: 25, spendRate: 0.55, cpc: 1.6, cvr: 0.18, ctr: 0.12, lostIs: 0.01 },
@@ -74,7 +74,7 @@ const SPECS: CampaignSpec[] = [
 ];
 
 // 30-day search term totals: [term, clicks, cost, conversions]
-const TERMS: Record<string, Array<[string, number, number, number]>> = {
+export const TERMS: Record<string, Array<[string, number, number, number]>> = {
   'c-101': [
     ['juniper yard apartments', 210, 380, 42],
     ['juniper yard', 95, 165, 21],
@@ -113,7 +113,7 @@ const TERMS: Record<string, Array<[string, number, number, number]>> = {
   ],
 };
 
-const ADS: Ad[] = [
+export const ADS: Ad[] = [
   {
     id: 'a-1011', campaignId: 'c-101', adGroupName: 'Brand', status: 'ENABLED',
     headlines: ['Juniper Yard Apartments', 'Official Site', 'Tour Juniper Yard Today'],
@@ -152,7 +152,7 @@ const ADS: Ad[] = [
   },
 ];
 
-const NEGATIVES: Record<string, NegativeKeyword[]> = {
+export const NEGATIVES: Record<string, NegativeKeyword[]> = {
   'c-101': [],
   'c-102': [{ text: 'craigslist', matchType: 'PHRASE' }],
   'c-201': [],
