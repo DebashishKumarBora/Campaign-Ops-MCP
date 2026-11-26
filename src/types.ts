@@ -145,6 +145,12 @@ export interface Approval {
   note?: string;
   expiresAt: string;
   bindingHash: string;
+  /**
+   * Proof that a person approved, when the channel can give one: for a
+   * passkey approval, the WebAuthn assertion that signed this exact change.
+   * Anyone with the passkey's public key can check it again later.
+   */
+  evidence?: Record<string, unknown>;
 }
 
 export interface Rejection {

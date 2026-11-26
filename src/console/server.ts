@@ -6,7 +6,7 @@ import type { Engine } from '../governance/engine.js';
 import type { AdsBackend } from '../backends/backend.js';
 import { UserError } from '../types.js';
 import { safeEqual } from '../util/hash.js';
-import { checkPulse } from '../governance/pulse.js';
+import { ConsoleApi } from './api.js';
 
 /**
  * The human approval console: a small web page on 127.0.0.1.
@@ -45,10 +45,15 @@ const STATIC: Record<string, { file: string; type: string }> = {
   '/app.css': { file: 'app.css', type: 'text/css; charset=utf-8' },
   '/fonts/source-serif-4-roman.woff2': { file: 'fonts/source-serif-4-roman.woff2', type: 'font/woff2' },
   '/fonts/source-serif-4-italic.woff2': { file: 'fonts/source-serif-4-italic.woff2', type: 'font/woff2' },
+  '/manifest.webmanifest': { file: 'manifest.webmanifest', type: 'application/manifest+json' },
+  '/icons/apple-touch-icon.png': { file: 'icons/apple-touch-icon.png', type: 'image/png' },
+  '/icons/icon-192.png': { file: 'icons/icon-192.png', type: 'image/png' },
+  '/icons/icon-512.png': { file: 'icons/icon-512.png', type: 'image/png' },
+  '/icons/icon-maskable-512.png': { file: 'icons/icon-maskable-512.png', type: 'image/png' },
 };
 
 const SECURITY_HEADERS: Record<string, string> = {
-  'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
   'X-Frame-Options': 'DENY',
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
@@ -88,37 +93,10 @@ async function readBody(req: http.IncomingMessage, limit = 10_000): Promise<Reco
   });
 }
 
-/** How long Pulse and witness results are reused. Both read the ad platform, which has daily limits. */
-const INSIGHT_TTL_MS = 5 * 60_000;
-/** "Check again" is ignored for results younger than this, so repeated clicks cannot burn through the daily limit. */
-const INSIGHT_MIN_REFRESH_MS = 20_000;
-
 export function startConsole(opts: ConsoleOptions): Promise<ConsoleHandle> {
   const { engine, backend } = opts;
   let actualPort = opts.port;
-  const insights = new Map<string, { at: number; sig: string; data: Record<string, unknown> }>();
-
-  /** Changes whenever a change is applied, so results never hide a fresh change. */
-  const appliedSignature = (accountId: string): string => {
-    const applied = engine.store.list().filter((p) => p.accountId === accountId && p.appliedAt);
-    return `${applied.length}:${applied.map((p) => p.appliedAt).sort().pop() ?? ''}`;
-  };
-
-  async function insightsFor(accountId: string, refresh: boolean): Promise<Record<string, unknown>> {
-    const account = await backend.getAccount(accountId);
-    if (!account) throw new UserError(`Unknown account ${accountId}.`);
-    const now = Date.now();
-    const sig = appliedSignature(account.id);
-    const hit = insights.get(account.id);
-    if (hit && hit.sig === sig && (now - hit.at < (refresh ? INSIGHT_MIN_REFRESH_MS : INSIGHT_TTL_MS))) return { ...hit.data, cached: true };
-    const [pulse, witness] = await Promise.all([
-      checkPulse(backend, account.id, { days: 28 }).catch((e: Error) => ({ error: e.message })),
-      engine.witness(account.id, 14).catch((e: Error) => ({ error: e.message })),
-    ]);
-    const data = { accountId: account.id, checkedAt: new Date(now).toISOString(), pulse, witness };
-    insights.set(account.id, { at: now, sig, data });
-    return { ...data, cached: false };
-  }
+  const api = new ConsoleApi({ engine, backend, version: opts.version });
 
   const allowedHosts = () => new Set([`127.0.0.1:${actualPort}`, `localhost:${actualPort}`]);
   const allowedOrigins = () => new Set([`http://127.0.0.1:${actualPort}`, `http://localhost:${actualPort}`]);
@@ -132,6 +110,8 @@ export function startConsole(opts: ConsoleOptions): Promise<ConsoleHandle> {
       const pathname = url.pathname;
 
       if (req.method === 'GET' && pathname === '/health') return send(res, 200, { ok: true, app: 'campaign-ops-console', version: opts.version });
+      // Tells the page which sign-in to show: the console key here, a passkey in the cloud.
+      if (req.method === 'GET' && pathname === '/mode') return send(res, 200, { mode: 'local' });
 
       if (req.method === 'GET' && STATIC[pathname]) {
         const asset = STATIC[pathname];
@@ -144,84 +124,16 @@ export function startConsole(opts: ConsoleOptions): Promise<ConsoleHandle> {
       const token = req.headers['x-console-token'];
       if (typeof token !== 'string' || !safeEqual(token, opts.token)) return send(res, 401, { error: 'Missing or wrong console key.' });
 
-      if (req.method === 'GET' && pathname === '/api/insights') {
-        const id = url.searchParams.get('account') ?? '';
-        if (!/^[A-Za-z0-9-]{3,40}$/.test(id)) return send(res, 400, { error: 'Pass ?account= with an account ID.' });
-        return send(res, 200, await insightsFor(id, url.searchParams.get('refresh') === '1'));
-      }
-
-      if (req.method === 'GET' && pathname === '/api/state') {
-        const listed = await backend.listAccounts();
-        const accounts = [];
-        for (const a of listed) accounts.push({ ...a, access: await engine.liveAccess(a.id) });
-        const proposals = await engine.listProposals({ limit: 80 });
-        const chain = engine.audit.verify();
-        const recent = engine.audit.recent(14);
-        const since = engine.now() - 86_400_000;
-        const all = engine.store.list();
-        return send(res, 200, {
-          app: { name: 'Campaign Ops', version: opts.version },
-          mode: backend.mode,
-          account: accounts[0] ?? null,
-          accounts,
-          scope: engine.scope,
-          killSwitch: engine.killSwitchState(),
-          policy: engine.policy,
-          counts: {
-            pending: all.filter((p) => p.status === 'pending_approval').length,
-            appliedToday: all.filter((p) => p.appliedAt && Date.parse(p.appliedAt) >= since).length,
-            blocked: all.filter((p) => p.status === 'blocked').length,
-          },
-          proposals,
-          audit: { ok: chain.ok, count: chain.count, problem: chain.problem, recent },
-          serverTime: new Date(engine.now()).toISOString(),
-        });
-      }
-
+      let body: Record<string, unknown> = {};
       if (req.method === 'POST') {
         const origin = req.headers.origin;
         if (origin && !allowedOrigins().has(origin.toLowerCase())) return send(res, 403, { error: 'Cross-origin request refused.' });
         const contentType = (req.headers['content-type'] ?? '').toLowerCase();
         if (!contentType.startsWith('application/json')) return send(res, 415, { error: 'Content-Type must be application/json.' });
-        const body = await readBody(req);
-        const note = typeof body.note === 'string' ? body.note : undefined;
-        const who = 'person (console)';
-
-        const match = /^\/api\/proposals\/(P-\d{4,})\/(approve|reject|undo)$/.exec(pathname);
-        if (match) {
-          const [, id, action] = match;
-          if (action === 'approve') return send(res, 200, { ok: true, proposal: await engine.approve(id, { by: who, channel: 'console', note }) });
-          if (action === 'reject') return send(res, 200, { ok: true, proposal: await engine.reject(id, { by: who, channel: 'console', note }) });
-          const result = await engine.undoNow(id, who);
-          const blocked = result.rollback.status === 'blocked';
-          const applied = result.outcome?.status === 'applied';
-          return send(res, 200, {
-            ok: applied,
-            rollback: result.rollback,
-            outcome: result.outcome ? { status: result.outcome.status, message: result.outcome.message } : undefined,
-            message: blocked
-              ? `Undo blocked: ${result.rollback.checks.filter((c) => c.status === 'fail').map((c) => c.detail ?? c.label).join(' ')}`
-              : result.outcome?.message ?? 'Undo requested.',
-          });
-        }
-
-        const win = /^\/api\/accounts\/([A-Za-z0-9-]{3,40})\/window(\/close)?$/.exec(pathname);
-        if (win) {
-          const [, accountId, close] = win;
-          if (close) {
-            await engine.closeChangeWindow(accountId, who);
-            return send(res, 200, { ok: true, access: await engine.liveAccess(accountId) });
-          }
-          const window = await engine.openChangeWindow(accountId, { hours: Number(body.hours), confirmName: typeof body.confirm === 'string' ? body.confirm : '', by: who });
-          return send(res, 200, { ok: true, window, access: await engine.liveAccess(accountId) });
-        }
-
-        if (pathname === '/api/kill-switch') {
-          if (typeof body.on !== 'boolean') return send(res, 400, { error: 'Send {"on": true} or {"on": false}.' });
-          await engine.setKillSwitch(body.on, who);
-          return send(res, 200, { ok: true, killSwitch: engine.killSwitchState() });
-        }
+        body = await readBody(req);
       }
+      const result = await api.handle({ method: req.method ?? 'GET', pathname, query: url.searchParams, body, who: 'person (console)' });
+      if (result) return send(res, result.status, result.body);
 
       return send(res, 404, { error: 'Not found.' });
     } catch (e) {

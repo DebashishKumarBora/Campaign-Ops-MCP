@@ -73,7 +73,11 @@ export function dashed(id: string): string {
 export function loadSettings(env: Env = process.env): GoogleAdsSettings | null {
   const file = settingsFile(env);
   if (!fs.existsSync(file)) return null;
-  const raw = readJson<Partial<GoogleAdsSettings> | null>(file, null);
+  return normalizeSettings(readJson<Partial<GoogleAdsSettings> | null>(file, null), env);
+}
+
+/** Cleans a google-ads.json object. Used for the file on this computer and for the copy stored as a cloud secret. */
+export function normalizeSettings(raw: Partial<GoogleAdsSettings> | null, env: Env = process.env): GoogleAdsSettings | null {
   if (!raw || typeof raw !== 'object') return null;
   return {
     keyFile: typeof raw.keyFile === 'string' && raw.keyFile ? raw.keyFile : defaultKeyFile(env),

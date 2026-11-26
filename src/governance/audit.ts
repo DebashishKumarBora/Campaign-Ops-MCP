@@ -21,7 +21,11 @@ export type AuditType =
   | 'tamper_detected'
   | 'change_window_opened'
   | 'change_window_closed'
-  | 'setup_changes';
+  | 'setup_changes'
+  | 'passkey_added'
+  | 'passkey_removed'
+  | 'connector_authorized'
+  | 'history_imported';
 
 export interface AuditEntry {
   seq: number;
@@ -54,16 +58,25 @@ function entryHash(e: Omit<AuditEntry, 'hash'>): string {
  * Callers must hold the engine lock while appending.
  */
 export class AuditLog {
+  /** The last verified copy of the log, so a console that checks every few seconds only re-hashes after a change. */
+  private verified?: { raw: string; result: ChainCheck };
+
   constructor(private readonly file: string) {}
 
-  readAll(): AuditEntry[] {
-    let raw: string;
+  private readRaw(): string {
     try {
-      raw = fs.readFileSync(this.file, 'utf8');
+      return fs.readFileSync(this.file, 'utf8');
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return '';
       throw e;
     }
+  }
+
+  readAll(): AuditEntry[] {
+    return this.parse(this.readRaw());
+  }
+
+  private parse(raw: string): AuditEntry[] {
     const out: AuditEntry[] = [];
     for (const line of raw.split('\n')) {
       if (!line.trim()) continue;
@@ -95,7 +108,14 @@ export class AuditLog {
   }
 
   verify(): ChainCheck {
-    const all = this.readAll();
+    const raw = this.readRaw();
+    if (this.verified && this.verified.raw === raw) return this.verified.result;
+    const result = this.check(this.parse(raw));
+    this.verified = { raw, result };
+    return result;
+  }
+
+  private check(all: AuditEntry[]): ChainCheck {
     let prev = GENESIS;
     let expectedSeq = 1;
     for (const e of all) {

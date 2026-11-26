@@ -114,11 +114,12 @@ export function fromChange(change: Change): Json {
 
 // ---------- output shaping ----------
 
-export function nextStep(p: Proposal): string {
+export function nextStep(p: Proposal, passkeyOnly = false): string {
   switch (p.status) {
     case 'blocked':
       return 'Blocked by policy. Read the failed checks, adjust the change and propose again. Do not try to work around Fair Housing blocks.';
     case 'pending_approval':
+      if (passkeyOnly) return `A person must approve ${p.id} with their passkey. Show them the approve_link (it opens the approval console on this proposal, where they sign this exact change), then call apply_change once they approve, or call it with wait_seconds to wait.`;
       return `A person must approve ${p.id}. Show them the approve_link (it opens the approval console on this proposal), then call apply_change: if your app supports approval prompts the person can approve there; otherwise call apply_change again once they approve (or pass wait_seconds).`;
     case 'approved':
       return `Approved by a person. Call apply_change with proposal_id "${p.id}".`;
@@ -145,7 +146,7 @@ export function approveLink(p: Proposal, consoleUrl?: string): string | undefine
   return `${consoleUrl.replace(/\/?$/, '/')}#p=${p.id}`;
 }
 
-export function proposalView(p: Proposal, consoleUrl?: string): Json {
+export function proposalView(p: Proposal, consoleUrl?: string, passkeyOnly = false): Json {
   return {
     id: p.id,
     status: p.status,
@@ -168,7 +169,7 @@ export function proposalView(p: Proposal, consoleUrl?: string): Json {
     applied_at: p.appliedAt,
     verification: p.verification?.status,
     error: p.error,
-    next_step: nextStep(p),
+    next_step: nextStep(p, passkeyOnly),
   };
 }
 
@@ -196,15 +197,40 @@ export interface ServerDeps {
   config: AppConfig;
   version: string;
   consoleUrl?: () => string | undefined;
+  /** Who the AI is, for the record. Defaults to the MCP client's name. */
+  agentName?: () => string | undefined;
+  /** Called when a proposal starts waiting for a person (the cloud sends a phone notification). */
+  onWaiting?: (p: Proposal) => void | Promise<void>;
+  /**
+   * True in the cloud: approvals happen only in the console, signed with a passkey.
+   * The in-chat approval prompt (MCP elicitation) is never offered.
+   */
+  passkeyOnly?: boolean;
 }
+
+const CHAT_APPROVAL = "A person approves in their app's approval prompt or in the Campaign Ops approval console.";
+const PASSKEY_APPROVAL = 'A person approves in the Campaign Ops approval console by signing the exact change with their passkey (Face ID, Touch ID or Windows Hello).';
 
 export function createMcpServer(deps: ServerDeps): McpServer {
   const { engine, backend, config } = deps;
-  const mcp = new McpServer({ name: 'campaign-ops-mcp', title: 'Campaign Ops MCP', version: deps.version }, { instructions: SERVER_INSTRUCTIONS });
+  const passkeyOnly = Boolean(deps.passkeyOnly);
+  const instructions = passkeyOnly ? SERVER_INSTRUCTIONS.replace(CHAT_APPROVAL, PASSKEY_APPROVAL) : SERVER_INSTRUCTIONS;
+  const mcp = new McpServer({ name: 'campaign-ops-mcp', title: 'Campaign Ops MCP', version: deps.version }, { instructions });
+  const view = (p: Proposal, withLink = true) => proposalView(p, withLink ? deps.consoleUrl?.() : undefined, passkeyOnly);
 
   const agentLabel = () => {
+    const named = deps.agentName?.();
+    if (named) return named;
     const client = mcp.server.getClientVersion();
     return client?.name ? `agent via ${client.name}` : 'agent';
+  };
+  const waiting = async (p: Proposal) => {
+    if (p.status !== 'pending_approval' || !deps.onWaiting) return;
+    try {
+      await deps.onWaiting(p);
+    } catch {
+      // a notification problem never blocks the proposal
+    }
   };
 
   const days = z.union([z.literal(7), z.literal(14), z.literal(30)]).default(30).describe('Lookback window in days: 7, 14 or 30.');
@@ -389,7 +415,7 @@ export function createMcpServer(deps: ServerDeps): McpServer {
           scope: engine.scope,
           kill_switch: kill.on,
           kill_switch_forced_by_environment: kill.forcedByEnv,
-          approvals: { required: true, approval_channels: ['approval prompt in your app (MCP elicitation)', 'Campaign Ops approval console'], ...engine.policy.approvals },
+          approvals: { required: true, approval_channels: passkeyOnly ? ['Campaign Ops approval console, signed with a passkey'] : ['approval prompt in your app (MCP elicitation)', 'Campaign Ops approval console'], ...engine.policy.approvals },
           policy: engine.policy,
           policy_source: config.policySource,
           fair_housing: 'Ad copy with violation-risk phrases and negative keywords that exclude protected groups are always blocked. This cannot be turned off in config.',
@@ -410,7 +436,7 @@ export function createMcpServer(deps: ServerDeps): McpServer {
     ({ status, limit }) =>
       guard(async () => {
         const list = await engine.listProposals({ status: status as ProposalStatus | undefined, limit });
-        return ok(`${list.length} proposals.`, { proposals: list.map((p) => proposalView(p, deps.consoleUrl?.())) });
+        return ok(`${list.length} proposals.`, { proposals: list.map((p) => view(p)) });
       }),
   );
 
@@ -421,7 +447,7 @@ export function createMcpServer(deps: ServerDeps): McpServer {
       guard(async () => {
         const p = await engine.getProposal(proposal_id.trim().toUpperCase());
         if (!p) return fail(`No proposal ${proposal_id}. Call list_proposals to see IDs.`);
-        return ok(`${p.id}: ${p.status.replace(/_/g, ' ')}.`, proposalView(p, deps.consoleUrl?.()));
+        return ok(`${p.id}: ${p.status.replace(/_/g, ' ')}.`, view(p));
       }),
   );
 
@@ -503,13 +529,14 @@ export function createMcpServer(deps: ServerDeps): McpServer {
       ({ account_id, change, reason }) =>
         guard(async () => {
           const p = await engine.propose({ accountId: account_id, change: toChange(change), reason, requestedBy: agentLabel() });
+          await waiting(p);
           const failed = p.checks.filter((c) => c.status === 'fail');
           const link = approveLink(p, deps.consoleUrl?.());
           const head =
             p.status === 'blocked'
               ? `${p.id} BLOCKED: ${failed.map((c) => c.detail ?? c.label).join(' ')}`
               : `${p.id} is waiting for human approval: ${p.summary}${link ? ` Approve or reject it here: ${link}` : ''}`;
-          return ok(head, proposalView(p, deps.consoleUrl?.()));
+          return ok(head, view(p));
         }),
     );
 
@@ -524,10 +551,11 @@ export function createMcpServer(deps: ServerDeps): McpServer {
       ({ proposal_id, reason }) =>
         guard(async () => {
           const p = await engine.requestRollback(proposal_id.trim().toUpperCase(), { reason, requestedBy: agentLabel() });
+          await waiting(p);
           const failed = p.checks.filter((c) => c.status === 'fail');
           const link = approveLink(p, deps.consoleUrl?.());
           const head = p.status === 'blocked' ? `Undo ${p.id} BLOCKED: ${failed.map((c) => c.detail ?? c.label).join(' ')}` : `Undo ${p.id} is waiting for human approval.${link ? ` Approve or reject it here: ${link}` : ''}`;
-          return ok(head, proposalView(p, deps.consoleUrl?.()));
+          return ok(head, view(p));
         }),
     );
   }
@@ -552,7 +580,7 @@ export function createMcpServer(deps: ServerDeps): McpServer {
           if (!p) return fail(`No proposal ${proposal_id}. Call list_proposals to see IDs.`);
 
           if (p.status === 'pending_approval') {
-            const caps = mcp.server.getClientCapabilities();
+            const caps = passkeyOnly ? undefined : mcp.server.getClientCapabilities();
             if (caps?.elicitation?.form) {
               try {
                 const res = await mcp.server.elicitInput(
@@ -574,7 +602,7 @@ export function createMcpServer(deps: ServerDeps): McpServer {
                   p = await engine.approve(id, { by: 'person (approval prompt)', channel: 'elicitation', note: typeof res.content.note === 'string' ? res.content.note : undefined });
                 } else if (res.action === 'accept' || res.action === 'decline') {
                   p = await engine.reject(id, { by: 'person (approval prompt)', channel: 'elicitation', note: typeof res.content?.note === 'string' ? res.content.note : undefined });
-                  return ok(`${id} was rejected by the person.`, { status: 'rejected', proposal: proposalView(p) });
+                  return ok(`${id} was rejected by the person.`, { status: 'rejected', proposal: view(p, false) });
                 }
               } catch (e) {
                 if (e instanceof UserError) throw e;
@@ -606,14 +634,14 @@ export function createMcpServer(deps: ServerDeps): McpServer {
               status: 'awaiting_approval',
               approve_link: link,
               next_step: `Ask the person to approve ${id}${where}. Then call apply_change again, or call it with wait_seconds to wait.`,
-              proposal: proposalView(p, deps.consoleUrl?.()),
+              proposal: view(p),
             });
           }
-          if (p.status === 'rejected') return ok(`${id} was rejected by a person.`, { status: 'rejected', proposal: proposalView(p) });
+          if (p.status === 'rejected') return ok(`${id} was rejected by a person.`, { status: 'rejected', proposal: view(p, false) });
 
           const outcome: ApplyOutcome = await engine.apply(id, { actor: agentLabel() });
-          const view = outcome.proposal ? proposalView(outcome.proposal) : undefined;
-          return ok(outcome.message, { status: outcome.status, verification: outcome.proposal?.verification?.status, proposal: view });
+          const applied = outcome.proposal ? view(outcome.proposal, false) : undefined;
+          return ok(outcome.message, { status: outcome.status, verification: outcome.proposal?.verification?.status, proposal: applied });
         }),
     );
   }

@@ -79,6 +79,11 @@ export function loadPolicy(file: string): { policy: Policy; source: string } {
   } catch (e) {
     throw new Error(`policy.json is not valid JSON: ${(e as Error).message}`);
   }
+  return { policy: parsePolicy(parsed), source: path.basename(file) };
+}
+
+/** Merges a policy.json object over the defaults and validates it. Used by the server and the cloud build. */
+export function parsePolicy(parsed: unknown): Policy {
   const merged = deepMerge(DEFAULT_POLICY, parsed);
   const result = PolicySchema.safeParse(merged);
   if (!result.success) {
@@ -89,7 +94,7 @@ export function loadPolicy(file: string): { policy: Policy; source: string } {
   if (policy.adCopy.minHeadlines > policy.adCopy.maxHeadlines || policy.adCopy.minDescriptions > policy.adCopy.maxDescriptions) {
     throw new Error('policy.json: minimum counts cannot be larger than maximum counts.');
   }
-  return { policy, source: path.basename(file) };
+  return policy;
 }
 
 function readOrCreateToken(dataDir: string): string {

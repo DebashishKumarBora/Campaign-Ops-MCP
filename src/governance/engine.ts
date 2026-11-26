@@ -325,7 +325,7 @@ export class Engine {
   }
 
   /** Human approval. Never exposed as an AI tool. */
-  async approve(id: string, by: { by: string; channel: ApprovalChannel; note?: string }): Promise<Proposal> {
+  async approve(id: string, by: { by: string; channel: ApprovalChannel; note?: string; evidence?: Record<string, unknown>; bindingHash?: string }): Promise<Proposal> {
     return this.lock.run(() => {
       const data = this.store.load();
       const changed = this.expireLocked(data.proposals);
@@ -345,6 +345,11 @@ export class Engine {
         this.log('tamper_detected', 'system', id, { stage: 'approve' });
         throw new UserError(p.error);
       }
+      // A signed approval names the exact change it signed. Anything else is refused.
+      if (by.bindingHash !== undefined && by.bindingHash !== p.bindingHash) {
+        if (changed) this.store.save(data);
+        throw new UserError(`${id} is not the change that was signed, so it was not approved.`);
+      }
       const now = this.now();
       p.approval = {
         by: cleanText(by.by, 80),
@@ -353,10 +358,11 @@ export class Engine {
         note: by.note ? cleanText(by.note, 300) : undefined,
         expiresAt: this.iso(now + this.opts.policy.approvals.approvalTtlMinutes * 60_000),
         bindingHash: p.bindingHash,
+        ...(by.evidence ? { evidence: by.evidence } : {}),
       };
       p.status = 'approved';
       this.store.save(data);
-      this.log('approved', p.approval.by, id, { channel: by.channel, note: p.approval.note });
+      this.log('approved', p.approval.by, id, { channel: by.channel, note: p.approval.note, ...(by.evidence ? { evidence: by.evidence } : {}) });
       return p;
     });
   }
@@ -492,6 +498,13 @@ export class Engine {
     });
   }
 
+  /** Records a security event that is not about one proposal (a passkey added, a connector authorized). */
+  async recordEvent(type: 'passkey_added' | 'passkey_removed' | 'connector_authorized' | 'history_imported', actor: string, details: Record<string, unknown> = {}): Promise<void> {
+    await this.lock.run(() => {
+      this.log(type, cleanText(actor, 80) || 'person', undefined, details);
+    });
+  }
+
   /** Records changes made by npm run gads:setup, so the witness check knows they were expected. */
   async recordSetup(input: { accountId: string; from: string; to: string; changes: number; by: string }): Promise<void> {
     await this.lock.run(() => {
@@ -525,10 +538,10 @@ export class Engine {
   }
 
   /** One-click undo from the human console: request, approve and apply in one step. */
-  async undoNow(id: string, by: string): Promise<{ rollback: Proposal; outcome?: ApplyOutcome }> {
+  async undoNow(id: string, by: string, evidence?: Record<string, unknown>): Promise<{ rollback: Proposal; outcome?: ApplyOutcome }> {
     const rollback = await this.requestRollback(id, { reason: `Undo ${id} from the approval console.`, requestedBy: by });
     if (rollback.status !== 'pending_approval') return { rollback };
-    await this.approve(rollback.id, { by, channel: 'console', note: 'One-click undo' });
+    await this.approve(rollback.id, { by, channel: 'console', note: 'One-click undo', evidence });
     const outcome = await this.apply(rollback.id, { actor: by, human: true });
     return { rollback: outcome.proposal ?? rollback, outcome };
   }
