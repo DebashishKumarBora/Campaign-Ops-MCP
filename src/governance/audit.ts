@@ -25,7 +25,8 @@ export type AuditType =
   | 'passkey_added'
   | 'passkey_removed'
   | 'connector_authorized'
-  | 'history_imported';
+  | 'history_imported'
+  | 'autopilot_settings';
 
 export interface AuditEntry {
   seq: number;
@@ -91,8 +92,7 @@ export class AuditLog {
 
   append(input: { ts: string; type: AuditType; actor: string; proposalId?: string; details?: Record<string, unknown> }): AuditEntry {
     ensureDir(path.dirname(this.file));
-    const all = this.readAll();
-    const last = all[all.length - 1];
+    const last = this.lastEntry();
     const base: Omit<AuditEntry, 'hash'> = {
       seq: last ? last.seq + 1 : 1,
       ts: input.ts,
@@ -105,6 +105,19 @@ export class AuditLog {
     const entry: AuditEntry = { ...base, hash: entryHash(base) };
     fs.appendFileSync(this.file, JSON.stringify(entry) + '\n', 'utf8');
     return entry;
+  }
+
+  /** The newest entry, read from the last line only, so appending stays fast as the log grows. */
+  private lastEntry(): AuditEntry | undefined {
+    const raw = this.readRaw().trimEnd();
+    if (!raw) return undefined;
+    const line = raw.slice(raw.lastIndexOf('\n') + 1);
+    try {
+      return JSON.parse(line) as AuditEntry;
+    } catch {
+      const all = this.readAll().filter((e) => e.seq > 0);
+      return all[all.length - 1];
+    }
   }
 
   verify(): ChainCheck {
@@ -130,7 +143,12 @@ export class AuditLog {
   }
 
   recent(limit: number, proposalId?: string): AuditEntry[] {
-    const all = this.readAll().filter((e) => !proposalId || e.proposalId === proposalId);
+    if (!proposalId) {
+      // Only the last lines are parsed, so a long log stays quick to show.
+      const lines = this.readRaw().split('\n').filter((l) => l.trim());
+      return this.parse(lines.slice(Math.max(0, lines.length - limit)).join('\n')).reverse();
+    }
+    const all = this.readAll().filter((e) => e.proposalId === proposalId);
     return all.slice(Math.max(0, all.length - limit)).reverse();
   }
 }

@@ -1,6 +1,6 @@
 import path from 'node:path';
 import type { AdsBackend } from '../backends/backend.js';
-import type { Account, ApprovalChannel, Change, Check, Policy, Proposal, ProposalStatus, Scope } from '../types.js';
+import type { Account, ApprovalChannel, Change, Check, Policy, Proposal, ProposalInsight, ProposalStatus, Scope } from '../types.js';
 import { UserError } from '../types.js';
 import { AuditLog, type AuditType } from './audit.js';
 import { ControlStore, ProposalStore, type ChangeWindow } from './stores.js';
@@ -43,6 +43,8 @@ export interface ProposeInput {
   reason: string;
   requestedBy: string;
   rollbackOf?: string;
+  /** Autopilot's reasons and numbers, shown with the proposal. */
+  insight?: ProposalInsight;
 }
 
 const OPEN: ProposalStatus[] = ['pending_approval', 'approved'];
@@ -308,6 +310,7 @@ export class Engine {
         bindingHash: '',
         expiresAt: this.iso(createdMs + this.opts.policy.approvals.proposalTtlHours * 3_600_000),
         rollbackOf: input.rollbackOf,
+        insight: cleanInsight(input.insight),
       };
       proposal.bindingHash = this.bindingOf(proposal);
 
@@ -385,7 +388,13 @@ export class Engine {
     });
   }
 
-  async apply(id: string, who: { actor: string; human?: boolean }): Promise<ApplyOutcome> {
+  /**
+   * Applies an approved change. signedLive is set only by the console, right
+   * after a person approved this exact change with a passkey: that signature
+   * is a stronger, narrower permission than a change window, so it also
+   * covers a live account for this one change.
+   */
+  async apply(id: string, who: { actor: string; human?: boolean; signedLive?: boolean }): Promise<ApplyOutcome> {
     if (!who.human && this.opts.scope !== 'execute') {
       return { status: 'refused', message: `This server runs in ${this.opts.scope} scope. Applying changes needs execute scope.` };
     }
@@ -408,7 +417,9 @@ export class Engine {
 
       const accountNow = await this.opts.backend.getAccount(p.accountId);
       if (!accountNow) return refuse(`Account ${p.accountId} is no longer available.`);
-      const access = this.liveFor(accountNow);
+      const window = this.liveFor(accountNow);
+      const signed = Boolean(who.signedLive && who.human && (p.approval?.evidence as { kind?: string } | undefined)?.kind === 'passkey');
+      const access = window.open || !signed ? window : { ...window, open: true };
       if (!access.open) return refuse(`${accountNow.name} is a live account and no change window is open. A person can open one in the approval console; then apply again.`);
 
       if (this.bindingOf(p) !== p.bindingHash || p.approval?.bindingHash !== p.bindingHash) {
@@ -474,7 +485,7 @@ export class Engine {
       this.store.save(data);
 
       if (passed) {
-        this.log('applied', p.appliedBy, id, { summary: p.summary, verified: true });
+        this.log('applied', p.appliedBy, id, { summary: p.summary, verified: true, ...(signed && !window.open ? { liveAccess: 'signed approval for this change' } : {}) });
         if (p.rollbackOf) this.log('rolled_back', p.appliedBy, p.rollbackOf, { by: id });
         return { status: 'applied', proposal: p, message: `Applied and verified: ${p.summary}` };
       }
@@ -499,7 +510,7 @@ export class Engine {
   }
 
   /** Records a security event that is not about one proposal (a passkey added, a connector authorized). */
-  async recordEvent(type: 'passkey_added' | 'passkey_removed' | 'connector_authorized' | 'history_imported', actor: string, details: Record<string, unknown> = {}): Promise<void> {
+  async recordEvent(type: 'passkey_added' | 'passkey_removed' | 'connector_authorized' | 'history_imported' | 'autopilot_settings', actor: string, details: Record<string, unknown> = {}): Promise<void> {
     await this.lock.run(() => {
       this.log(type, cleanText(actor, 80) || 'person', undefined, details);
     });
@@ -513,7 +524,7 @@ export class Engine {
   }
 
   /** Creates an undo proposal for an applied change. The undo needs approval like any other change. */
-  async requestRollback(id: string, input: { reason?: string; requestedBy: string }): Promise<Proposal> {
+  async requestRollback(id: string, input: { reason?: string; requestedBy: string; insight?: ProposalInsight }): Promise<Proposal> {
     if (this.opts.scope === 'read') throw new UserError('This server runs in read scope, so rollbacks are turned off.');
     await this.sweep();
     const all = this.store.list();
@@ -534,6 +545,7 @@ export class Engine {
       reason: input.reason && input.reason.trim().length >= 10 ? input.reason : `Undo ${id}: restore the previous value.`,
       requestedBy: input.requestedBy,
       rollbackOf: id,
+      insight: input.insight,
     });
   }
 
@@ -545,4 +557,17 @@ export class Engine {
     const outcome = await this.apply(rollback.id, { actor: by, human: true });
     return { rollback: outcome.proposal ?? rollback, outcome };
   }
+}
+
+/** Keeps Autopilot's notes short and plain before they are stored. */
+function cleanInsight(i: ProposalInsight | undefined): ProposalInsight | undefined {
+  if (!i || !i.skill) return undefined;
+  const out: ProposalInsight = { skill: cleanText(i.skill, 40) };
+  if (i.impact) out.impact = cleanText(i.impact, 160);
+  if (typeof i.impactMonthly === 'number' && Number.isFinite(i.impactMonthly)) out.impactMonthly = Math.round(i.impactMonthly * 100) / 100;
+  if (i.evidence?.length) out.evidence = i.evidence.slice(0, 8).map((e) => cleanText(e, 240));
+  if (i.caution) out.caution = cleanText(i.caution, 300);
+  if (i.ai) out.ai = cleanText(i.ai, 160);
+  if (i.keys?.length) out.keys = [...new Set(i.keys.map((k) => cleanText(k, 120)).filter(Boolean))].slice(0, 40);
+  return out;
 }

@@ -10,6 +10,9 @@ import type { AppConfig } from './config.js';
 import type { Change, Proposal, ProposalStatus } from './types.js';
 import { UserError } from './types.js';
 import { sleep } from './util/fsx.js';
+import type { Autopilot } from './autopilot/autopilot.js';
+import type { Job } from './autopilot/types.js';
+import { skillName } from './autopilot/settings.js';
 
 export const SERVER_INSTRUCTIONS = `Campaign Ops lets you analyze a Google Ads account and change it under human control.
 How to work:
@@ -21,7 +24,8 @@ How to work:
 6. If a proposal is blocked, read the failed checks and adjust. Never try to work around Fair Housing or policy blocks, and never re-word a protected-group exclusion to slip past the check.
 7. Check each account's mode in list_accounts. "sandbox" means all data is synthetic. "google_ads_test" means a real Google Ads test account: campaigns, budgets, keywords and ads are real and every change goes to Google, but performance numbers are simulated because test accounts never show ads. "google_ads" means a live account with real numbers and real money: it is read-only until a person opens a change window in the approval console, so proposals can be approved but not applied until then. Say which kind of account you are reporting on.
 8. For an ad with a Fair Housing problem, the fastest safe step is set_ad_status PAUSED (the stopgap_change in run_diagnostics), then propose compliant copy with update_ad_text.
-9. verify_with_google compares Google's own change history with the approval log. Use it when the person asks whether anything changed without approval, or after applying changes.`;
+9. verify_with_google compares Google's own change history with the approval log. Use it when the person asks whether anything changed without approval, or after applying changes.
+10. Autopilot watches the accounts on its own around the clock and writes proposals signed "Autopilot". Call get_autopilot_report to see what it found and what is waiting, and do not propose a change it already has open.`;
 
 type Json = Record<string, unknown>;
 
@@ -206,6 +210,10 @@ export interface ServerDeps {
    * The in-chat approval prompt (MCP elicitation) is never offered.
    */
   passkeyOnly?: boolean;
+  /** Autopilot, when this server runs it. */
+  autopilot?: Autopilot;
+  /** Runs Autopilot jobs (the cloud queues them). */
+  runAutopilot?: (jobs: Job[]) => Promise<void>;
 }
 
 const CHAT_APPROVAL = "A person approves in their app's approval prompt or in the Campaign Ops approval console.";
@@ -512,6 +520,64 @@ export function createMcpServer(deps: ServerDeps): McpServer {
       }),
   );
 
+  if (deps.autopilot) {
+    const autopilot = deps.autopilot;
+    mcp.registerTool(
+      'get_autopilot_report',
+      {
+        title: 'What Autopilot found',
+        description:
+          'Autopilot watches every account around the clock: broken lead tracking, stalled campaigns, spend spikes, lead drops, landing pages that are down, ads Google disapproved, changes made outside Campaign Ops, wasted searches, risky ad copy, budget pacing and the results of past changes. It writes fixes as proposals for a person to approve. This returns its recent findings, what is waiting for approval and its settings. Changes nothing.',
+        inputSchema: { limit: z.number().int().min(1).max(60).default(20).describe('How many recent findings to return.') },
+        annotations: READ,
+      },
+      ({ limit }) =>
+        guard(async () => {
+          const r = await autopilot.report();
+          const waiting = (await engine.listProposals({ status: 'pending_approval', limit: 40 })).filter((p) => p.insight);
+          const on = r.skills.filter((k) => r.settings.skills[k.id]).map((k) => k.name);
+          const headline = r.status.on
+            ? `Autopilot is on. ${waiting.length ? `${waiting.length} of its proposals are waiting for approval.` : 'None of its proposals are waiting.'}${r.impact.monthly > 0 ? ` Changes it proposed and a person approved save about ${r.impact.monthly.toFixed(0)} a month.` : ''}`
+            : 'Autopilot is off. A person can turn it on in the approval console.';
+          return ok(headline, {
+            on: r.status.on,
+            daily_review: `${String(r.settings.reviewHour).padStart(2, '0')}:00 ${r.settings.timezone}`,
+            next_review: r.status.nextReview,
+            last_hourly_check: r.status.lastWatch,
+            free_ai: r.ai.available ? `on (${r.ai.model})` : 'not available here, rules only',
+            skills_on: on,
+            waiting_for_approval: waiting.map((p) => ({ id: p.id, what: p.summary, why: p.reason, found_by: skillName(p.insight!.skill), impact: p.insight!.impact, approve_link: approveLink(p, deps.consoleUrl?.()) })),
+            recent: r.feed.slice(0, limit).map((f) => ({ at: f.at, level: f.level, kind: f.kind, skill: f.skill ? skillName(f.skill) : undefined, account: f.accountId, title: f.title, detail: f.detail, next_steps: f.steps, proposals: f.proposalIds })),
+          });
+        }),
+    );
+  }
+
+  if (deps.autopilot && config.scope !== 'read') {
+    const autopilot = deps.autopilot;
+    mcp.registerTool(
+      'request_autopilot_check',
+      {
+        title: 'Ask Autopilot to check now',
+        description:
+          'Asks Autopilot to run its full review now instead of waiting for the daily one: Pulse, the health check, Fair Housing screening, landing pages and the results of past changes. Anything it wants to change becomes a proposal that a person approves. Changes nothing by itself. Then call get_autopilot_report.',
+        inputSchema: { account_id: accountId.optional().describe('One account, or leave out for every account Autopilot looks after.') },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      },
+      ({ account_id }) =>
+        guard(async () => {
+          const jobs = await autopilot.checkNow(account_id);
+          if (deps.runAutopilot) {
+            await deps.runAutopilot(jobs);
+            return ok('Autopilot is checking now. Its findings appear in get_autopilot_report within a minute or two.', { queued: jobs.length });
+          }
+          await autopilot.runAll(jobs);
+          const r = await autopilot.report();
+          return ok('Autopilot finished its check.', { recent: r.feed.slice(0, 10).map((f) => ({ level: f.level, title: f.title, detail: f.detail, proposals: f.proposalIds })) });
+        }),
+    );
+  }
+
   if (config.scope !== 'read') {
     mcp.registerTool(
       'propose_change',
@@ -641,6 +707,10 @@ export function createMcpServer(deps: ServerDeps): McpServer {
 
           const outcome: ApplyOutcome = await engine.apply(id, { actor: agentLabel() });
           const applied = outcome.proposal ? view(outcome.proposal, false) : undefined;
+          // Approving in the console applies the change straight away, so by now it may already be live.
+          if (outcome.status === 'already_applied' && outcome.proposal?.verification?.status === 'passed') {
+            return ok(`Applied and verified when the person approved it: ${outcome.proposal.summary}`, { status: 'applied', verification: 'passed', applied_by: outcome.proposal.appliedBy, proposal: applied });
+          }
           return ok(outcome.message, { status: outcome.status, verification: outcome.proposal?.verification?.status, proposal: applied });
         }),
     );

@@ -102,6 +102,48 @@ export function pushService() {
   };
 }
 
+// ---------- a Workers AI stand-in: canned answers in the shapes the real models use ----------
+
+export async function aiStandIn() {
+  const calls = [];
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const { model, input } = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+      const system = String(input?.messages?.[0]?.content ?? '');
+      const user = JSON.parse(String(input?.messages?.[1]?.content ?? '{}'));
+      let answer = {};
+      if (/review search terms/.test(system)) answer = { exclude: user.terms_to_review ?? [], keep: [] };
+      else if (/fix lines/.test(system)) {
+        answer = {
+          replacements: (user.replace ?? []).map((r) => ({
+            field: r.field,
+            options: r.field.startsWith('Headline') ? ['Perfect for Singles', 'Ideal Downtown Location'] : ['Community near downtown with a resort-style pool.'],
+          })),
+        };
+      } else if (/add lines/.test(system)) answer = { headlines: ['Book a Tour Online', 'Free Month of Rent'], descriptions: ['See floor plans and book a tour online today.'] };
+      calls.push({ model, kind: Object.keys(answer)[0] });
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: `Here you go:\n${JSON.stringify(answer)}` } }] }));
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  return { url: `http://127.0.0.1:${server.address().port}/ai`, calls, close: () => new Promise((r) => server.close(r)) };
+}
+
+// ---------- landing pages the ads send people to ----------
+
+export async function landingPages() {
+  const state = { down: false, hits: 0 };
+  const server = http.createServer((req, res) => {
+    state.hits++;
+    if (state.down && req.url.startsWith('/northlight')) return res.writeHead(503).end('down for maintenance');
+    res.writeHead(200, { 'Content-Type': 'text/html' }).end('<h1>Northlight Lofts</h1>');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  return { url: `http://127.0.0.1:${server.address().port}`, state, close: () => new Promise((r) => server.close(r)) };
+}
+
 // ---------- a laptop with some history to move to the cloud ----------
 
 export async function laptopHistory() {
@@ -131,7 +173,7 @@ export const LIVE = '5550002222';
 export const LIVE_D = '555-000-2222';
 export const LIVE_NAME = 'Acme Apartments';
 
-export async function fakeGoogle() {
+export async function fakeGoogle(pagesUrl) {
   const fake = new FakeGoogleAds();
   fake.accessLevel = 'explorer';
   fake.addCustomer({ id: MGR, name: 'Acme Agency', manager: true, testAccount: false });
@@ -140,7 +182,28 @@ export async function fakeGoogle() {
   const auth = new ServiceAccountAuth(fake.serviceAccountKey(), fake.fetch);
   const builder = new GoogleAdsClient({ auth, apiVersion: 'v26', loginCustomerId: MGR, fetchImpl: fake.fetch, sleep: async () => undefined });
   await seedAccount(builder, LIVE);
-  fake.account(LIVE).events.length = 0; // people built these campaigns, not the robot
+  const live = fake.account(LIVE);
+  live.events.length = 0; // people built these campaigns, not the robot
+  // Northlight Lofts Brand sends people to a page on this computer, so the landing page check has something to open.
+  const brand = [...live.campaigns.values()].find((c) => c.name.startsWith('Northlight Lofts | Search | Brand'));
+  const groups = new Set([...live.adGroups.values()].filter((g) => g.campaignId === brand.id).map((g) => g.id));
+  for (const ad of live.ads.values()) if (groups.has(ad.adGroupId) && pagesUrl) ad.finalUrls = [`${pagesUrl}/northlight`];
+  // And Google has disapproved one ad, the way it does when a page stops working.
+  const juniper = [...live.campaigns.values()].find((c) => c.name.startsWith('Juniper Yard | Search | Generic'));
+  const jGroups = new Set([...live.adGroups.values()].filter((g) => g.campaignId === juniper.id).map((g) => g.id));
+  const disapproved = [...live.ads.values()].find((ad) => jGroups.has(ad.adGroupId));
+  disapproved.policy = { approvalStatus: 'DISAPPROVED', topics: ['DESTINATION_NOT_WORKING'] };
+  // Real numbers for two campaigns: leads stop recording on the brand campaign (for Pulse), and the
+  // generic campaign pays for searches that never bring a lead (for the AI's second opinion).
+  const brandJY = [...live.campaigns.values()].find((c) => c.name.startsWith('Juniper Yard | Search | Brand'));
+  const end = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Chicago' }).format(new Date(Date.now() - 86_400_000));
+  const series = [];
+  for (let i = 27; i >= 0; i--) series.push({ date: new Date(Date.parse(`${end}T12:00:00Z`) - i * 86_400_000).toISOString().slice(0, 10), impressions: 400, clicks: 40, cost: 80, conversions: i < 3 ? 0 : 3 });
+  fake.setDailyMetrics(LIVE, brandJY.id, series);
+  const jGroup = [...jGroups][0];
+  for (const [term, clicks, cost, conversions] of [['apartments for rent near me', 128, 430, 9], ['apartment jobs', 38, 126, 0], ['storage units near me', 19, 63, 0]]) {
+    fake.addSearchTerm(LIVE, { campaignId: juniper.id, adGroupId: jGroup, term, impressions: clicks * 20, clicks, cost, conversions });
+  }
   const served = await fake.listen();
   return { fake, served };
 }
@@ -162,15 +225,19 @@ export async function startCloud({ log = false } = {}) {
   const IMPORT_TOKEN = crypto.randomBytes(24).toString('base64url');
   const push = pushService();
   const subscription = await push.start();
-  const google = await fakeGoogle();
+  const ai = await aiStandIn();
+  const pages = await landingPages();
+  const google = await fakeGoogle(pages.url);
   const history = await laptopHistory();
   const configName = `wrangler.e2e-${port}.jsonc`;
 
   const baseConfig = fs.readFileSync(path.join(root, 'cloud', 'wrangler.base.jsonc'), 'utf8');
+  // Workers AI always runs on Cloudflare, even in wrangler dev, so this run uses the stand-in instead.
   const devConfig = baseConfig
     .replace('"compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"]', '"compatibility_flags": ["nodejs_compat"]')
-    .replace('"kv_namespaces": [{ "binding": "OAUTH_KV" }]', '"kv_namespaces": [{ "binding": "OAUTH_KV", "id": "e2e-oauth" }]');
-  assert.notEqual(devConfig, baseConfig, 'cloud/wrangler.base.jsonc changed shape; update test/e2e/harness.mjs');
+    .replace('"kv_namespaces": [{ "binding": "OAUTH_KV" }]', '"kv_namespaces": [{ "binding": "OAUTH_KV", "id": "e2e-oauth" }]')
+    .replace('"ai": { "binding": "AI" },', '');
+  assert.ok(!devConfig.includes('"ai":') && devConfig.includes('"id": "e2e-oauth"') && devConfig.includes('"compatibility_flags": ["nodejs_compat"]'), 'cloud/wrangler.base.jsonc changed shape; update test/e2e/harness.mjs');
   fs.writeFileSync(path.join(root, 'cloud', configName), devConfig);
 
   const vapid = await generateVapidKeys();
@@ -185,6 +252,7 @@ export async function startCloud({ log = false } = {}) {
     GOOGLE_ADS_SETTINGS: JSON.stringify(settings),
     GOOGLE_ADS_API_BASE_URL: google.served.url,
     ALLOW_INSECURE_TEST_ENDPOINTS: '1',
+    AI_TEST_URL: ai.url,
   };
   const envFile = path.join(base, 'e2e.env');
   fs.writeFileSync(envFile, Object.entries(vars).map(([k, v]) => `${k}='${v}'`).join('\n'));
@@ -206,6 +274,8 @@ export async function startCloud({ log = false } = {}) {
     child.kill();
     await push.close().catch(() => undefined);
     await google.served.close().catch(() => undefined);
+    await ai.close().catch(() => undefined);
+    await pages.close().catch(() => undefined);
     fs.rmSync(path.join(root, 'cloud', configName), { force: true });
     fs.rmSync(base, { recursive: true, force: true });
   };
@@ -222,5 +292,5 @@ export async function startCloud({ log = false } = {}) {
     await stop();
     throw e;
   }
-  return { BASE, port, IMPORT_TOKEN, push, subscription, google, history, stop, output: () => output };
+  return { BASE, port, IMPORT_TOKEN, push, subscription, google, history, ai, pages, stop, output: () => output };
 }

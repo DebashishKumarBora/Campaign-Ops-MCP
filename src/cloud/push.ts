@@ -27,6 +27,8 @@ export interface PushMessage {
   url: string;
   /** Notifications with the same tag replace each other. */
   tag?: string;
+  /** False for news that can wait: the push service may hold it until the phone wakes. */
+  urgent?: boolean;
 }
 
 async function hkdf(salt: Uint8Array, ikm: Uint8Array, info: Uint8Array, length: number): Promise<Uint8Array> {
@@ -130,7 +132,7 @@ export async function sendPush(
       'Content-Encoding': 'aes128gcm',
       'Content-Type': 'application/octet-stream',
       TTL: '86400',
-      Urgency: 'high',
+      Urgency: message.urgent === false ? 'normal' : 'high',
       ...(message.tag ? { Topic: message.tag.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32) || 'cops' } : {}),
       Authorization: await vapidAuthorization(sub.endpoint, vapid, subject),
     },

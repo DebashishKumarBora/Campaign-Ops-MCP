@@ -7,6 +7,7 @@ import type { AdsBackend } from '../backends/backend.js';
 import { UserError } from '../types.js';
 import { safeEqual } from '../util/hash.js';
 import { ConsoleApi } from './api.js';
+import type { Autopilot } from '../autopilot/autopilot.js';
 
 /**
  * The human approval console: a small web page on 127.0.0.1.
@@ -30,7 +31,16 @@ export interface ConsoleOptions {
   port: number;
   uiDir: string;
   version: string;
+  /** Autopilot, shown and controlled in the console. */
+  autopilot?: Autopilot;
+  /** Run Autopilot's hourly check while this console is open. */
+  tick?: boolean;
 }
+
+/** How often Autopilot checks while a console runs on a computer. */
+const TICK_MS = 60 * 60_000;
+/** The first check after the console starts. */
+const FIRST_TICK_MS = 2 * 60_000;
 
 export interface ConsoleHandle {
   port: number;
@@ -43,8 +53,8 @@ const STATIC: Record<string, { file: string; type: string }> = {
   '/': { file: 'index.html', type: 'text/html; charset=utf-8' },
   '/app.js': { file: 'app.js', type: 'text/javascript; charset=utf-8' },
   '/app.css': { file: 'app.css', type: 'text/css; charset=utf-8' },
-  '/fonts/source-serif-4-roman.woff2': { file: 'fonts/source-serif-4-roman.woff2', type: 'font/woff2' },
-  '/fonts/source-serif-4-italic.woff2': { file: 'fonts/source-serif-4-italic.woff2', type: 'font/woff2' },
+  '/theme.js': { file: 'theme.js', type: 'text/javascript; charset=utf-8' },
+  '/fonts/plus-jakarta-sans.woff2': { file: 'fonts/plus-jakarta-sans.woff2', type: 'font/woff2' },
   '/manifest.webmanifest': { file: 'manifest.webmanifest', type: 'application/manifest+json' },
   '/icons/apple-touch-icon.png': { file: 'icons/apple-touch-icon.png', type: 'image/png' },
   '/icons/icon-192.png': { file: 'icons/icon-192.png', type: 'image/png' },
@@ -96,7 +106,27 @@ async function readBody(req: http.IncomingMessage, limit = 10_000): Promise<Reco
 export function startConsole(opts: ConsoleOptions): Promise<ConsoleHandle> {
   const { engine, backend } = opts;
   let actualPort = opts.port;
-  const api = new ConsoleApi({ engine, backend, version: opts.version });
+  const autopilot = opts.autopilot;
+  const api = new ConsoleApi({ engine, backend, version: opts.version, autopilot, runAutopilot: autopilot ? (jobs) => autopilot.runAll(jobs) : undefined });
+
+  // Autopilot on a computer: checks every hour while the console is open.
+  let busy = false;
+  const tick = async () => {
+    if (!autopilot || busy) return;
+    busy = true;
+    try {
+      await autopilot.runAll(await autopilot.plan());
+    } catch (e) {
+      console.error('[campaign-ops] autopilot check failed:', (e as Error).message);
+    } finally {
+      busy = false;
+    }
+  };
+  const timers: NodeJS.Timeout[] = [];
+  if (autopilot && opts.tick) {
+    timers.push(setTimeout(() => void tick(), FIRST_TICK_MS), setInterval(() => void tick(), TICK_MS));
+    for (const t of timers) t.unref();
+  }
 
   const allowedHosts = () => new Set([`127.0.0.1:${actualPort}`, `localhost:${actualPort}`]);
   const allowedOrigins = () => new Set([`http://127.0.0.1:${actualPort}`, `http://localhost:${actualPort}`]);
@@ -155,6 +185,7 @@ export function startConsole(opts: ConsoleOptions): Promise<ConsoleHandle> {
         urlWithKey: `${url}#key=${opts.token}`,
         close: () =>
           new Promise<void>((done) => {
+            for (const t of timers) clearTimeout(t);
             server.close(() => done());
             server.closeAllConnections();
           }),

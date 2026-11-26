@@ -1,4 +1,6 @@
 import { test, describe } from 'node:test';
+import { Autopilot } from '../src/autopilot/autopilot.js';
+import type { Notice } from '../src/autopilot/types.js';
 import assert from 'node:assert/strict';
 import { checkPulse } from '../src/governance/pulse.js';
 import { LIVE, LIVE_D, MGR, REASON, START, days, liveRig, person } from './liveRig.js';
@@ -253,4 +255,35 @@ describe('Explorer access', () => {
       r.cleanup();
     }
   });
+});
+
+test('live account: ads Google disapproved or limited reach Autopilot, once', async () => {
+  const r = await liveRig();
+  try {
+    const live = r.fake.account(LIVE);
+    const ads = [...live.ads.values()];
+    ads[0].policy = { approvalStatus: 'DISAPPROVED', topics: ['DESTINATION_NOT_WORKING'] };
+    ads[1].policy = { approvalStatus: 'APPROVED_LIMITED', topics: ['HOUSING_PERSONALIZED_ADS'] };
+    const issues = await r.router.getAdPolicyIssues(LIVE_D);
+    assert.equal(issues.length, 2);
+    const off = issues.find((i) => i.approval === 'DISAPPROVED')!;
+    assert.equal(off.adId, ads[0].id);
+    assert.deepEqual(off.topics, ['Destination not working']);
+    assert.equal(issues.find((i) => i.approval === 'LIMITED')!.topics[0], 'Housing personalized ads');
+    assert.deepEqual(await r.router.getAdPolicyIssues('123-456-7890'), [], 'the sandbox has no policy review');
+
+    const sent: Array<{ title: string; urgent: boolean }> = [];
+    const autopilot = new Autopilot({ engine: r.engine, backend: r.router, dataDir: r.dir, notify: (n: Notice[]) => void sent.push(...n), clock: () => r.clock.now, fetchPage: async () => ({ status: 200 }) });
+    await autopilot.updateSettings({ quiet: { on: false } }, 'Deb');
+    await autopilot.run({ kind: 'watch', accountId: LIVE_D });
+    assert.ok(sent.some((n) => n.urgent && /Google disapproved ad/.test(n.title)));
+    assert.ok(sent.some((n) => !n.urgent && /Google limited ad/.test(n.title)));
+    const count = sent.length;
+    r.clock.advanceMinutes(60);
+    await autopilot.run({ kind: 'watch', accountId: LIVE_D });
+    assert.equal(sent.filter((n) => /Google (disapproved|limited)/.test(n.title)).length, 2, 'the same verdict is not sent every hour');
+    assert.ok(sent.length >= count);
+  } finally {
+    r.cleanup();
+  }
 });

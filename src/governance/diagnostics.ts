@@ -2,6 +2,7 @@ import type { AdsBackend } from '../backends/backend.js';
 import type { Campaign, Change, DailyMetric, Policy } from '../types.js';
 import { UserError } from '../types.js';
 import { categoryLabel, lintAd, protectedTermIn } from './fairHousing.js';
+import { negativeMatches } from './changes.js';
 import { money, round2, share } from '../util/format.js';
 
 export const GOOGLE_ADS_LIVE_NOTE =
@@ -158,7 +159,11 @@ export async function runDiagnostics(backend: AdsBackend, policy: Policy, accoun
     const campaign = overview.campaigns.find((c) => c.id === campaignId);
     if (!campaign || campaign.status !== 'ENABLED') continue;
     const brand = campaign.community.toLowerCase();
-    const waste = rows.filter((t) => t.conversions === 0 && t.cost >= 40 && t.clicks >= 10 && !t.term.toLowerCase().includes(brand));
+    const candidates = rows.filter((t) => t.conversions === 0 && t.cost >= 40 && t.clicks >= 10 && !t.term.toLowerCase().includes(brand));
+    if (candidates.length === 0) continue;
+    // Searches an existing negative already blocks are done: the report covers the period before it was added.
+    const negatives = await backend.listNegatives(accountId, campaignId);
+    const waste = candidates.filter((t) => !negatives.some((n) => negativeMatches(n, t.term)));
     const usable: typeof rows = [];
     for (const t of waste) {
       const hit = protectedTermIn(t.term);

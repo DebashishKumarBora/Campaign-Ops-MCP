@@ -29,7 +29,7 @@ export interface FakeCustomer {
 interface Budget { id: string; name: string; amountMicros: number; removed?: boolean }
 interface Camp { id: string; name: string; status: string; channel: string; budget: string; eu?: string }
 interface AdGroup { id: string; name: string; campaignId: string }
-interface Ad { id: string; adGroupId: string; status: string; headlines: string[]; descriptions: string[]; finalUrls: string[] }
+interface Ad { id: string; adGroupId: string; status: string; headlines: string[]; descriptions: string[]; finalUrls: string[]; policy?: { approvalStatus: string; topics: string[] } }
 interface Crit { id: string; campaignId: string; text: string; matchType: string; negative: boolean; removed?: boolean }
 
 export interface FakeDay { date: string; impressions: number; clicks: number; cost: number; conversions: number; lostIs?: number }
@@ -393,6 +393,9 @@ export class FakeGoogleAds {
             resourceName: `customers/${customerId}/adGroupAds/${group.id}~${ad.id}`,
             status: ad.status,
             ad: { resourceName: `customers/${customerId}/ads/${ad.id}`, id: ad.id, finalUrls: ad.finalUrls, responsiveSearchAd: { headlines: ad.headlines.map((text) => ({ text })), descriptions: ad.descriptions.map((text) => ({ text })) } },
+            policySummary: q.includes('policy_summary')
+              ? { approvalStatus: ad.policy?.approvalStatus ?? 'APPROVED', reviewStatus: 'REVIEWED', policyTopicEntries: (ad.policy?.topics ?? []).map((topic) => ({ topic, type: 'PROHIBITED' })) }
+              : undefined,
           },
           adGroup: { resourceName: `customers/${customerId}/adGroups/${group.id}`, id: group.id, name: group.name },
           campaign: { resourceName: `customers/${customerId}/campaigns/${group.campaignId}`, id: group.campaignId },

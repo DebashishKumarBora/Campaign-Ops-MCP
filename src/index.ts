@@ -19,7 +19,7 @@ async function main(): Promise<void> {
   let consoleUrl: string | undefined;
   if (config.consolePort > 0) {
     try {
-      consoleHandle = await startConsole({ engine: app.engine, backend: app.backend, token: config.consoleToken, port: config.consolePort, uiDir: app.uiDir, version: app.version });
+      consoleHandle = await startConsole({ engine: app.engine, backend: app.backend, token: config.consoleToken, port: config.consolePort, uiDir: app.uiDir, version: app.version, autopilot: app.autopilot, tick: process.env.CAMPAIGN_OPS_AUTOPILOT !== 'off' });
       consoleUrl = consoleHandle.url;
       log(`Approval console: ${consoleHandle.url} (run "npm run console" to open it with your key)`);
     } catch (e) {
@@ -32,7 +32,7 @@ async function main(): Promise<void> {
     }
   }
 
-  const mcp = createMcpServer({ engine: app.engine, backend: app.backend, config, version: app.version, consoleUrl: () => consoleUrl });
+  const mcp = createMcpServer({ engine: app.engine, backend: app.backend, config, version: app.version, consoleUrl: () => consoleUrl, autopilot: app.autopilot });
 
   let closing = false;
   const shutdown = async (code = 0) => {

@@ -1,4 +1,4 @@
-import type { Account, Ad, BackendMode, Campaign, Change, ChangeEvent, DailyMetric, NegativeKeyword, SearchTermRow } from '../types.js';
+import type { Account, Ad, AdPolicyIssue, BackendMode, Campaign, Change, ChangeEvent, DailyMetric, NegativeKeyword, SearchTermRow } from '../types.js';
 
 export interface MutateResult {
   ok: boolean;
@@ -45,4 +45,6 @@ export interface AdsBackend {
    * (a sandbox rebuilt today has no record of last week). ISO time.
    */
   changeHistoryStart?(accountId: string): Promise<string | undefined>;
+  /** Running ads the platform disapproved or limited. Optional: the sandbox has no policy review. */
+  getAdPolicyIssues?(accountId: string): Promise<AdPolicyIssue[]>;
 }

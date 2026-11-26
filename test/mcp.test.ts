@@ -61,7 +61,7 @@ test('MCP: tools, diagnostics, proposal, and approval from another process', asy
   const client = await connect(dir);
   try {
     const tools = (await client.listTools()).tools.map((t) => t.name).sort();
-    assert.deepEqual(tools, ['apply_change', 'check_ad_copy', 'check_pulse', 'get_account_overview', 'get_ads', 'get_audit_log', 'get_policy', 'get_proposal', 'get_search_terms', 'list_accounts', 'list_proposals', 'propose_change', 'request_rollback', 'run_diagnostics', 'verify_with_google']);
+    assert.deepEqual(tools, ['apply_change', 'check_ad_copy', 'check_pulse', 'get_account_overview', 'get_ads', 'get_audit_log', 'get_autopilot_report', 'get_policy', 'get_proposal', 'get_search_terms', 'list_accounts', 'list_proposals', 'propose_change', 'request_autopilot_check', 'request_rollback', 'run_diagnostics', 'verify_with_google']);
     const apply = (await client.listTools()).tools.find((t) => t.name === 'apply_change')!;
     assert.equal(apply.annotations?.destructiveHint, true);
 
@@ -101,7 +101,8 @@ test('MCP: read scope exposes no write tools', async () => {
   const client = await connect(freshDir(), { scope: 'read' });
   try {
     const tools = (await client.listTools()).tools.map((t) => t.name);
-    for (const name of ['propose_change', 'apply_change', 'request_rollback']) assert.ok(!tools.includes(name), `${name} must be hidden`);
+    for (const name of ['propose_change', 'apply_change', 'request_rollback', 'request_autopilot_check']) assert.ok(!tools.includes(name), `${name} must be hidden`);
+    assert.ok(tools.includes('get_autopilot_report'), 'reading what Autopilot found is fine in read scope');
   } finally {
     await client.close();
   }

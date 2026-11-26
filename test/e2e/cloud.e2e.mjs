@@ -1,12 +1,15 @@
 // End-to-end check of Campaign Ops in the cloud, run entirely on this computer:
 //   the real Worker and Durable Object (wrangler dev, the same runtime as Cloudflare),
 //   a fake Google Ads API with a live account, a fake push service that decrypts
-//   every notification, and Chromium with a virtual passkey (WebAuthn over CDP).
+//   every notification, a Workers AI stand-in, a landing page that can go down,
+//   and Chromium with a virtual passkey (WebAuthn over CDP).
 //
 // It walks the whole story: move history from a laptop, set up the first passkey,
 // connect an AI app through OAuth with passkey consent, propose over MCP, get the
-// phone notification, approve with a passkey, apply, open a live change window,
-// undo, check every signature, run the morning watch, add and remove a passkey.
+// phone notification, approve with a passkey (which applies the change), undo,
+// check every signature, then let Autopilot work: Check now, the AI-written fix,
+// Google's disapproval, a landing page that goes down on the hourly tick, and
+// Autopilot's settings. Then add and remove a passkey and sign out and in.
 //
 // Run: npm run test:cloud   (needs Playwright with Chromium: npx playwright install chromium)
 
@@ -32,7 +35,7 @@ async function step(name, fn) {
     console.error(`✕ ${name}\n${e.stack}`);
     if (currentPage) {
       const text = await currentPage.evaluate(() => document.body.innerText).catch(() => '');
-      console.error(`Page at failure: ${currentPage.url()}\n${text.slice(0, 800)}`);
+      console.error(`Page at failure: ${currentPage.url()}\n${text.slice(0, 900)}`);
     }
     throw e;
   }
@@ -49,7 +52,7 @@ try {
     cloud = await startCloud();
     assert.deepEqual(await (await fetch(`${cloud.BASE}/mode`)).json(), { mode: 'cloud' });
   });
-  const { BASE, IMPORT_TOKEN, push, subscription, google, history } = cloud;
+  const { BASE, IMPORT_TOKEN, push, subscription, google, history, ai, pages } = cloud;
 
   const post = (p, body, headers = {}) => fetch(`${BASE}${p}`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: BASE, ...headers }, body: JSON.stringify(body) });
 
@@ -67,6 +70,7 @@ try {
 
   await step('the console API refuses anyone without a passkey session', async () => {
     assert.equal((await fetch(`${BASE}/api/state`)).status, 401);
+    assert.equal((await fetch(`${BASE}/api/autopilot`)).status, 401);
     const s = await (await fetch(`${BASE}/auth/session`)).json();
     assert.deepEqual(s, { mode: 'cloud', signedIn: false, hasPasskeys: false, setupOpen: true });
     const cross = await fetch(`${BASE}/auth/setup/options`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://evil.example' }, body: '{}' });
@@ -74,7 +78,7 @@ try {
   });
 
   browser = await chromium.launch();
-  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true });
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true, colorScheme: 'dark' });
   const page = await context.newPage();
   currentPage = page;
   const errors = [];
@@ -86,13 +90,21 @@ try {
   const authenticator = (opts = {}) => cdp.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true, ...opts } });
   let phone = (await authenticator()).authenticatorId;
 
-  const toast = (text) => page.locator('.toast', { hasText: text }).first().waitFor({ timeout: 15_000 });
+  const toast = (text) => page.locator('.toast', { hasText: text }).first().waitFor({ timeout: 20_000 });
   const inPage = async (p, method = 'GET', body) => {
     if (!page.url().startsWith(BASE)) await page.goto(BASE);
     return page.evaluate(async ([p, method, body]) => {
       const res = await fetch(p, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
       return { status: res.status, body: await res.json().catch(() => ({})) };
     }, [p, method, body]);
+  };
+  const tab = (id) => page.click(`.nav [data-act="nav"][data-id="${id}"]`);
+  /** Opens a proposal the way a link or a notification does. */
+  const openSheet = async (id) => {
+    if (!page.url().startsWith(BASE)) await page.goto(BASE);
+    await page.evaluate((h) => { location.hash = h; }, `p=${id}`);
+    await page.locator(`#sheet-${id}`).waitFor();
+    return page.locator(`#sheet-${id}`);
   };
 
   await step('a wrong setup code is refused', async () => {
@@ -109,11 +121,11 @@ try {
     await page.fill('#setup-code', SETUP_CODE.toLowerCase());
     await page.click('#setup-form button[type="submit"]');
     await toast('Passkey created on iPhone');
-    await page.locator('.hero-title').waitFor();
+    await page.locator('.status').waitFor();
     const creds = (await cdp.send('WebAuthn.getCredentials', { authenticatorId: phone })).credentials;
     assert.equal(creds.length, 1);
     assert.equal(creds[0].isResidentCredential, true);
-    const s = await (await page.evaluate(() => fetch('/auth/session').then((r) => r.json())));
+    const s = await page.evaluate(() => fetch('/auth/session').then((r) => r.json()));
     assert.equal(s.signedIn, true);
     assert.equal(s.setupOpen, false, 'the setup code works once');
     const cookies = await context.cookies(BASE);
@@ -131,6 +143,9 @@ try {
     assert.equal(state.cloud.passkeys.length, 1);
     assert.ok(state.accounts.some((a) => a.id === LIVE_D && a.mode === 'google_ads'), 'the live Google Ads account is listed');
     assert.ok(state.proposals.some((p) => p.status === 'applied' && p.requestedBy === 'agent (laptop)'));
+    assert.equal(state.applyOnApprove, true, 'approving applies');
+    assert.equal(state.autopilot.on, true, 'Autopilot starts on');
+    assert.equal(state.autopilot.ai, true, 'the free AI is wired up');
   });
 
   await step('this phone subscribes to notifications (a fake push service on this computer)', async () => {
@@ -230,8 +245,9 @@ try {
     const init = await mcp('initialize', { protocolVersion: '2025-06-18', capabilities: { elicitation: { form: {} } }, clientInfo: { name: 'claude-e2e', version: '1.0.0' } });
     assert.equal(init.serverInfo.name, 'campaign-ops-mcp');
     assert.match(init.instructions, /signing the exact change with their passkey/);
+    assert.match(init.instructions, /Autopilot watches the accounts/);
     const tools = (await mcp('tools/list', {})).tools.map((t) => t.name);
-    for (const t of ['list_accounts', 'propose_change', 'apply_change', 'check_pulse', 'verify_with_google']) assert.ok(tools.includes(t), t);
+    for (const t of ['list_accounts', 'propose_change', 'apply_change', 'check_pulse', 'verify_with_google', 'get_autopilot_report', 'request_autopilot_check']) assert.ok(tools.includes(t), t);
     const policy = await tool('get_policy');
     assert.deepEqual(policy.approvals.approval_channels, ['Campaign Ops approval console, signed with a passkey']);
     const get = await fetch(`${BASE}/mcp`, { headers: { Authorization: `Bearer ${token}`, Accept: 'text/event-stream' } });
@@ -278,56 +294,57 @@ try {
     assert.equal(replay.status, 400, 'a used challenge cannot be replayed');
   });
 
-  await step('the approve link opens the slip; Approve with passkey signs this exact change', async () => {
+  await step('the approve link opens the proposal; the passkey signs this exact change and it is applied', async () => {
     await page.goto(`${BASE}/#p=${pSandbox}`);
-    const slip = page.locator(`#slip-${pSandbox}`);
-    await slip.waitFor();
-    await slip.locator('.from-chat').waitFor();
-    const fp = (await slip.locator('.fp').textContent()).replace(' ', '');
+    const sheet = page.locator(`#sheet-${pSandbox}`);
+    await sheet.waitFor();
+    await sheet.locator('text=You opened this from a link').waitFor();
+    const fp = (await sheet.locator('.fp').textContent()).replace(' ', '');
     const p = (await inPage('/api/state')).body.proposals.find((x) => x.id === pSandbox);
-    assert.equal(fp, p.bindingHash.slice(0, 8).toUpperCase(), 'the fingerprint on the slip is the hash the passkey signs');
-    await slip.locator('[data-act="approve"]', { hasText: 'Approve with passkey' }).click();
-    await toast(`Approved and signed ${pSandbox}`);
+    assert.equal(fp, p.bindingHash.slice(0, 8).toUpperCase(), 'the fingerprint shown is the hash the passkey signs');
+    await sheet.locator('[data-act="approve"]', { hasText: 'Approve with passkey' }).click();
+    await toast(`Approved and signed ${pSandbox}. Applied and checked.`);
     const after = (await inPage('/api/state')).body.proposals.find((x) => x.id === pSandbox);
-    assert.equal(after.status, 'approved');
+    assert.equal(after.status, 'applied', 'approve means apply');
+    assert.equal(after.verification.status, 'passed');
     assert.match(after.approval.by, /^Deb \(passkey on iPhone\)$/);
     assert.equal(after.approval.evidence.kind, 'passkey');
     assert.equal(after.approval.evidence.binding, after.bindingHash);
     const applied = await tool('apply_change', { proposal_id: pSandbox });
-    assert.equal(applied.status, 'applied', JSON.stringify(applied).slice(0, 600));
+    assert.equal(applied.status, 'applied', 'the AI sees it as applied too');
+    assert.equal(applied.verification, 'passed');
   });
 
   let pLive;
-  await step('a live account stays read-only until a change window is opened with the passkey', async () => {
+  await step('on a live account the signature is the permission for that one change; a change window still opens', async () => {
     const overview = await tool('get_account_overview', { account_id: LIVE_D, days: 7 });
     const c = overview.campaigns.find((x) => x.status === 'ENABLED');
     const out = await tool('propose_change', { account_id: LIVE_D, change: { type: 'set_campaign_budget', campaign_id: c.id, new_daily_budget: Math.round(c.dailyBudget * 1.1) }, reason: 'Budget-limited all week with strong cost per lead, so a small raise is safe.' });
     assert.equal(out.status, 'pending_approval', JSON.stringify(out).slice(0, 400));
     pLive = out.id;
-    await page.goto(`${BASE}/#p=${pLive}`);
-    await page.locator(`#slip-${pLive} [data-act="approve"]`).click();
-    await toast('Open a change window so it can be applied');
     const writes = google.fake.writes().length;
-    const locked = await tool('apply_change', { proposal_id: pLive });
-    assert.notEqual(locked.status, 'applied', 'nothing is applied while the account is read-only');
-    assert.equal(google.fake.writes().length, writes);
-    // On a phone the account cards live on the Watch tab.
-    await page.click('[data-act="tab"][data-id="watch"]');
-    await page.locator(`[data-act="window"][data-id="${LIVE_D}"]:visible`).first().click();
+    const sheet = await openSheet(pLive);
+    await sheet.locator('text=Live account, real money').waitFor();
+    await sheet.locator('[data-act="approve"]').click();
+    await toast(`Approved and signed ${pLive}. Applied and checked.`);
+    assert.ok(google.fake.writes().length > writes, 'the change reached Google Ads');
+    const audit = (await inPage('/api/state')).body.audit.recent;
+    assert.equal(audit.find((e) => e.type === 'applied' && e.proposalId === pLive).details.liveAccess, 'signed approval for this change');
+    // A change window is still there for changes applied later.
+    await tab('accounts');
+    await page.locator(`.acct[data-id="${LIVE_D}"]`).click();
+    await page.locator('[data-act="window"]').click();
     await page.fill('#dlg-confirm', LIVE_NAME);
     await page.click('[data-act="window-open"]');
     await toast(`Change window open for ${LIVE_NAME}`);
-    const applied = await tool('apply_change', { proposal_id: pLive });
-    assert.equal(applied.status, 'applied', JSON.stringify(applied).slice(0, 300));
-    assert.ok(google.fake.writes().length > writes, 'the change reached Google Ads');
-    const audit = (await inPage('/api/state')).body.audit.recent;
-    const opened = audit.find((e) => e.type === 'change_window_opened');
+    await page.locator('.lockline', { hasText: 'Changes allowed until' }).waitFor();
+    const opened = (await inPage('/api/state')).body.audit.recent.find((e) => e.type === 'change_window_opened');
     assert.match(opened.actor, /passkey on iPhone/);
   });
 
   await step('undo needs the passkey too, and Google records the robot changes', async () => {
-    await page.goto(BASE);
-    await page.locator(`[data-act="undo"][data-id="${pSandbox}"]`).click();
+    const sheet = await openSheet(pSandbox);
+    await sheet.locator('[data-act="undo"]', { hasText: 'Undo with passkey' }).click();
     await toast(`Undone. ${pSandbox} was reverted`);
     const st = (await inPage('/api/state')).body;
     const original = st.proposals.find((x) => x.id === pSandbox);
@@ -339,15 +356,16 @@ try {
     assert.equal(witness.unexplained_robot_changes.length, 0);
   });
 
-  await step('every stored signature checks out again, from the Record page', async () => {
-    await page.click('[data-act="tab"][data-id="record"]');
+  await step('every stored signature checks out again, from Activity', async () => {
+    await page.goto(BASE);
+    await tab('activity');
     await page.click('[data-act="sig-check"]');
-    await page.locator('.settings .quiet-line', { hasText: 'check out' }).waitFor();
+    await page.locator('.sig-box .quiet-line', { hasText: 'check out' }).waitFor();
     const sig = (await inPage('/api/signatures')).body;
     assert.equal(sig.valid, sig.total);
     assert.ok(sig.total >= 3, `expected at least 3 signatures, got ${sig.total}`);
-    await page.click('[data-act="tab"][data-id="approve"]');
-    await page.locator('.seal-tag.ok:visible').first().waitFor();
+    const sheet = await openSheet(pLive);
+    await sheet.locator('.seal-tag.ok').waitFor();
   });
 
   await step('pausing needs no passkey; resuming does', async () => {
@@ -356,23 +374,120 @@ try {
     const plain = await inPage('/api/kill-switch', 'POST', { on: false });
     assert.equal(plain.status, 400);
     await page.goto(BASE);
-    await page.click('[data-act="resume"]');
+    await page.locator('.banner', { hasText: 'All changes are paused' }).waitFor();
+    await page.click('.top [data-act="resume"]');
     await toast('Changes resumed');
   });
 
-  await step('the morning watch sends one Pulse alarm and does not repeat it', async () => {
+  // ---------- Autopilot ----------
+
+  let autoProposals;
+  let checkedAt = 0;
+  await step('Check now: Autopilot reviews the live account, rings the phone and writes the fixes with the free AI', async () => {
+    // Quiet hours depend on the time this runs, so they are off for a predictable check.
+    const quiet = await inPage('/api/autopilot/settings', 'POST', { settings: { quiet: { on: false } } });
+    assert.equal(quiet.status, 200, JSON.stringify(quiet.body));
+    const report = (await inPage('/api/autopilot')).body;
+    assert.equal(report.accounts.find((a) => a.id === LIVE_D).watched, true);
+    assert.equal(report.accounts.find((a) => a.mode === 'sandbox').watched, false, 'the sandbox repeats the same simulation, so it is not watched once a real account is connected');
     const before = push.received.length;
-    const r = await fetch(`${BASE}/__scheduled?cron=7+13+*+*+*`);
-    assert.equal(r.status, 200);
-    const pulse = await waitFor('the Pulse notification', () => push.received.slice(before).find((x) => x.message && /^Pulse: /.test(x.message.title)), 20_000);
-    assert.match(pulse.message.url, /^\/#a=/);
-    const count = push.received.length;
-    await fetch(`${BASE}/__scheduled?cron=7+13+*+*+*`);
-    await sleep(2500);
-    assert.equal(push.received.slice(count).filter((x) => x.message && /^Pulse: /.test(x.message.title)).length, 0, 'the same alarm is not sent twice');
-    await page.goto(`${BASE}${pulse.message.url}`);
-    await page.locator('.watch .alarm').first().waitFor();
-    assert.equal(await page.locator('#app').getAttribute('data-tab'), 'watch');
+    await page.goto(BASE);
+    await page.locator('.status').waitFor();
+    await page.click('[data-act="ap-check"]');
+    checkedAt = Date.now();
+    await toast('Autopilot is checking now');
+    autoProposals = await waitFor(
+      'the review to finish',
+      async () => {
+        const st = (await inPage('/api/state')).body;
+        const mine = st.proposals.filter((p) => p.requestedBy === 'Autopilot' && p.accountId === LIVE_D);
+        return !st.autopilot.running.length && st.autopilot.latest.some((f) => f.kind === 'review') && mine.length ? mine : null;
+      },
+      90_000,
+    );
+    const pause = autoProposals.find((p) => p.insight.skill === 'fair_housing' && p.change.type === 'set_ad_status');
+    const rewrite = autoProposals.find((p) => p.insight.skill === 'fair_housing' && p.change.type === 'update_ad_text');
+    const negatives = autoProposals.find((p) => p.insight.skill === 'wasted_searches');
+    assert.ok(pause && rewrite && negatives, autoProposals.map((p) => p.summary).join(' | '));
+    assert.equal(pause.status, 'pending_approval');
+    assert.match(rewrite.insight.ai, /The AI wrote the new lines/);
+    assert.ok(rewrite.change.headlines.includes('Ideal Downtown Location'), rewrite.change.headlines.join(', '));
+    assert.ok(!rewrite.change.headlines.some((h) => /singles/i.test(h)), 'copy that fails the Fair Housing screen is refused');
+    assert.equal(rewrite.fairHousing.status, 'clean');
+    assert.match(negatives.insight.ai, /double-checked/);
+    assert.deepEqual(negatives.change.keywords.map((k) => k.text).sort(), ['apartment jobs', 'storage units near me']);
+    assert.ok(ai.calls.some((c) => c.kind === 'replacements') && ai.calls.some((c) => c.kind === 'exclude'), JSON.stringify(ai.calls));
+    const got = push.received.slice(before).filter((x) => x.message);
+    assert.ok(got.some((x) => x.message.urgent && x.message.url === `/#p=${pause.id}`), 'the risky ad rings the phone, linked to its fix');
+    assert.ok(got.some((x) => x.message.urgent && x.message.title === 'Leads stopped recording'), 'Pulse found the broken tracking');
+    assert.ok(got.some((x) => x.message.urgent && /Google disapproved ad/.test(x.message.title)), "Google's disapproval reached the phone");
+    assert.ok(got.some((x) => !x.message.urgent && /for you to approve/.test(x.message.title)), 'then one summary for the rest');
+    await page.locator('.status h1', { hasText: /need you|needs you/ }).waitFor();
+  });
+
+  await step('approve the AI-written copy with the passkey (it goes to Google); turn down the pause and it is remembered', async () => {
+    const rewrite = autoProposals.find((p) => p.insight.skill === 'fair_housing' && p.change.type === 'update_ad_text');
+    const pause = autoProposals.find((p) => p.insight.skill === 'fair_housing' && p.change.type === 'set_ad_status');
+    const writes = google.fake.writes().length;
+    let sheet = await openSheet(rewrite.id);
+    await sheet.locator('text=The AI wrote the new lines').waitFor();
+    await sheet.locator('[data-act="approve"]').click();
+    await toast(`Approved and signed ${rewrite.id}. Applied and checked.`);
+    assert.ok(google.fake.writes().length > writes, 'the new copy reached Google Ads');
+    sheet = await openSheet(pause.id);
+    await sheet.locator('[data-act="reject"]').click();
+    await toast(`Turned down ${pause.id}. Autopilot will not ask again for 30 days.`);
+    const st = (await inPage('/api/state')).body;
+    assert.equal(st.proposals.find((p) => p.id === rewrite.id).status, 'applied');
+    assert.equal(st.proposals.find((p) => p.id === pause.id).status, 'rejected');
+  });
+
+  await step('the hourly tick: a landing page that fails twice gets its campaign paused, and Google is not asked twice', async () => {
+    const before = push.received.length;
+    pages.state.down = true;
+    const lastWatch = async () => (await inPage('/api/state')).body.autopilot.lastWatch;
+    let seen = await lastWatch();
+    for (let i = 0; i < 2; i++) {
+      assert.equal((await fetch(`${BASE}/__scheduled?cron=17+*+*+*+*`)).status, 200);
+      const prev = seen;
+      seen = await waitFor(`tick ${i + 1}`, async () => {
+        const w = await lastWatch();
+        return w && w !== prev ? w : null;
+      }, 30_000);
+    }
+    const down = await waitFor('the landing page notification', () => push.received.slice(before).find((x) => x.message && x.message.title === 'Landing page down'), 20_000);
+    assert.equal(down.message.urgent, true);
+    assert.ok(pages.state.hits >= 2);
+    const st = (await inPage('/api/state')).body;
+    const p = st.proposals.find((x) => x.insight && x.insight.skill === 'landing_pages');
+    assert.ok(p, 'the pause is proposed');
+    assert.equal(p.change.type, 'set_campaign_status');
+    assert.equal(p.change.newStatus, 'PAUSED');
+    assert.match(p.targetLabel, /^Northlight Lofts \| Search \| Brand/);
+    assert.equal(push.received.slice(before).filter((x) => x.message && /Google disapproved/.test(x.message.title)).length, 0, 'the same disapproval is not sent again');
+    assert.ok(!st.proposals.some((x) => x.requestedBy === 'Autopilot' && x.insight.skill === 'fair_housing' && x.change.type === 'set_ad_status' && x.status === 'pending_approval'), 'the turned-down pause does not come back');
+    pages.state.down = false;
+  });
+
+  await step("Autopilot's settings change from the app, are recorded, and Claude sees them", async () => {
+    await page.goto(BASE);
+    await tab('settings');
+    await page.click('[data-act="fold"][data-id="skills"]');
+    await page.click('[data-act="ap-skill"][data-id="ad_refresh"]');
+    await waitFor('the skill to turn off', async () => (await inPage('/api/autopilot')).body.settings.skills.ad_refresh === false);
+    await page.selectOption('select[data-set="reviewHour"]', '6');
+    await waitFor('the review hour to change', async () => (await inPage('/api/autopilot')).body.settings.reviewHour === 6);
+    const report = await tool('get_autopilot_report');
+    assert.ok(!report.skills_on.includes('Fuller ads'));
+    assert.match(report.daily_review, /^06:00 /);
+    assert.ok(report.waiting_for_approval.some((w) => w.found_by === 'Landing pages'));
+    assert.ok(report.recent.length > 3);
+    const audit = (await inPage('/api/state')).body.audit.recent;
+    assert.ok(audit.some((e) => e.type === 'autopilot_settings' && /^Deb/.test(e.actor)), 'settings changes are in the audit log, with who made them');
+    // Check now works at most every 10 seconds, so a row of taps cannot pile up work.
+    await sleep(Math.max(0, checkedAt + 10_500 - Date.now()));
+    const queued = await tool('request_autopilot_check', { account_id: LIVE_D });
+    assert.ok(queued.queued >= 2);
   });
 
   await step('the refresh token gets a new access token that works', async () => {
@@ -389,7 +504,7 @@ try {
     await cdp.send('WebAuthn.removeVirtualAuthenticator', { authenticatorId: phone });
     phone = (await authenticator()).authenticatorId; // a new laptop with Windows Hello
     await page.goto(BASE);
-    await page.click('[data-act="tab"][data-id="record"]');
+    await tab('settings');
     await page.click('[data-act="passkey-add"]');
     await toast('Passkey added');
     let keys = (await inPage('/api/state')).body.cloud.passkeys;
@@ -408,7 +523,7 @@ try {
     await page.locator('[data-gate="login"]').waitFor();
     assert.equal((await inPage('/api/state')).status, 401);
     await page.click('[data-gate="login"]');
-    await page.locator('.hero-title').waitFor();
+    await page.locator('.status').waitFor();
   });
 
   await step('app registrations a stranger can start are capped per day', async () => {
@@ -419,14 +534,22 @@ try {
     assert.equal(statuses[statuses.length - 1], 429);
   });
 
-  await step('the console works at phone and desktop widths with no page errors', async () => {
-    for (const width of [360, 768, 1440]) {
-      await page.setViewportSize({ width, height: 900 });
-      await page.goto(BASE);
-      await page.locator('.hero-title').waitFor();
-      const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
-      assert.ok(overflow <= 0, `page scrolls sideways at ${width}px by ${overflow}px`);
+  await step('every screen works from 360 to 1440 pixels, light and dark, with no page errors', async () => {
+    for (const scheme of ['dark', 'light']) {
+      await page.emulateMedia({ colorScheme: scheme });
+      for (const width of [360, 768, 1024, 1440]) {
+        await page.setViewportSize({ width, height: 900 });
+        await page.goto(BASE);
+        await page.locator('.status').waitFor();
+        for (const view of ['home', 'approvals', 'accounts', 'activity', 'settings']) {
+          await page.click(`${width >= 900 ? '.side' : '.nav'} [data-act="nav"][data-id="${view}"]`);
+          await page.locator('#view').waitFor();
+          const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+          assert.ok(overflow <= 0, `${view} scrolls sideways at ${width}px (${scheme}) by ${overflow}px`);
+        }
+      }
     }
+    await sleep(200);
     assert.deepEqual(errors, []);
   });
 } catch (e) {

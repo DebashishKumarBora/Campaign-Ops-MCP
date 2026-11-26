@@ -1,5 +1,5 @@
 import type { AdsBackend, MutateOptions, MutateResult } from './backend.js';
-import type { Account, Ad, BackendMode, Campaign, Change, ChangeEvent, DailyMetric, NegativeKeyword, SearchTermRow } from '../types.js';
+import type { Account, Ad, AdPolicyIssue, BackendMode, Campaign, Change, ChangeEvent, DailyMetric, NegativeKeyword, SearchTermRow } from '../types.js';
 import { UserError } from '../types.js';
 
 /**
@@ -104,6 +104,12 @@ export class RouterBackend implements AdsBackend {
   async changeHistoryStart(accountId: string): Promise<string | undefined> {
     const b = await this.route(accountId);
     return b?.changeHistoryStart ? b.changeHistoryStart(accountId) : undefined;
+  }
+
+  /** Empty when the backend that owns the account has no policy review (the sandbox). */
+  async getAdPolicyIssues(accountId: string): Promise<AdPolicyIssue[]> {
+    const b = await this.need(accountId);
+    return b.getAdPolicyIssues ? b.getAdPolicyIssues(accountId) : [];
   }
 
   /** True when the backend that owns the account can report its change history. */

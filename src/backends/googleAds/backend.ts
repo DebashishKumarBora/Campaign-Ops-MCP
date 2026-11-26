@@ -1,5 +1,5 @@
 import type { AdsBackend, MutateOptions, MutateResult } from '../backend.js';
-import type { Account, Ad, BackendMode, Campaign, Change, ChangeEvent, ChannelType, DailyMetric, MatchType, NegativeKeyword, SearchTermRow } from '../../types.js';
+import type { Account, Ad, AdPolicyIssue, BackendMode, Campaign, Change, ChangeEvent, ChannelType, DailyMetric, MatchType, NegativeKeyword, SearchTermRow } from '../../types.js';
 import { UserError } from '../../types.js';
 import { buildSandboxState, defaultEndDate, SPECS, type SandboxState } from '../seed.js';
 import { addDays, money, normalizeKeyword, round2 } from '../../util/format.js';
@@ -47,6 +47,16 @@ interface AdRow {
     ad?: { id?: string; finalUrls?: string[]; responsiveSearchAd?: { headlines?: Array<{ text?: string }>; descriptions?: Array<{ text?: string }> } };
   };
   adGroup?: { id?: string; name?: string };
+  campaign?: { id?: string };
+}
+
+interface PolicyRow {
+  adGroupAd?: {
+    status?: string;
+    ad?: { id?: string };
+    policySummary?: { approvalStatus?: string; reviewStatus?: string; policyTopicEntries?: Array<{ topic?: string; type?: string }> };
+  };
+  adGroup?: { name?: string };
   campaign?: { id?: string };
 }
 
@@ -117,6 +127,11 @@ const num = (v: unknown): number => {
 };
 const statusWord = (s?: string) => (s === 'ENABLED' ? 'Enabled' : s === 'PAUSED' ? 'Paused' : s === 'REMOVED' ? 'Removed' : String(s ?? 'unknown').toLowerCase());
 const camelToSnake = (f: string) => f.trim().replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+/** DESTINATION_NOT_WORKING becomes "Destination not working". */
+const humanTopic = (topic: string) => {
+  const t = topic.trim().replace(/_/g, ' ').toLowerCase();
+  return t ? t[0].toUpperCase() + t.slice(1) : '';
+};
 
 export class GoogleAdsBackend implements AdsBackend {
   readonly mode: BackendMode;
@@ -397,6 +412,29 @@ export class GoogleAdsBackend implements AdsBackend {
     if (!a || !id) return undefined;
     const rows = await this.search<AdRow>(a, this.adQuery(` AND ad_group_ad.ad.id = ${id}`));
     return rows.length ? this.toAd(rows[0]) : undefined;
+  }
+
+  /** Running ads Google disapproved or limited, with its policy topics in plain words. */
+  async getAdPolicyIssues(accountId: string): Promise<AdPolicyIssue[]> {
+    const a = this.need(accountId);
+    const rows = await this.search<PolicyRow>(
+      a,
+      `SELECT ad_group_ad.ad.id, ad_group_ad.status, ad_group_ad.policy_summary.approval_status, ad_group_ad.policy_summary.review_status,
+              ad_group_ad.policy_summary.policy_topic_entries, ad_group.name, campaign.id
+       FROM ad_group_ad
+       WHERE ad_group_ad.status = 'ENABLED' AND ad_group.status = 'ENABLED' AND campaign.status = 'ENABLED'`,
+    );
+    const out: AdPolicyIssue[] = [];
+    for (const r of rows) {
+      const id = r.adGroupAd?.ad?.id;
+      const status = r.adGroupAd?.policySummary?.approvalStatus;
+      if (!id || !r.campaign?.id) continue;
+      const approval = status === 'DISAPPROVED' ? 'DISAPPROVED' : status === 'APPROVED_LIMITED' || status === 'AREA_OF_INTEREST_ONLY' ? 'LIMITED' : undefined;
+      if (!approval) continue;
+      const topics = [...new Set((r.adGroupAd?.policySummary?.policyTopicEntries ?? []).map((t) => humanTopic(t.topic ?? '')).filter(Boolean))];
+      out.push({ adId: String(id), campaignId: String(r.campaign.id), adGroupName: r.adGroup?.name ?? '', approval, topics });
+    }
+    return out;
   }
 
   private async negativeRows(a: GoogleAdsAccountSetting, campaignId: string): Promise<Array<NegativeKeyword & { resourceName: string }>> {

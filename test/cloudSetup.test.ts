@@ -38,7 +38,7 @@ if (cmd === 'whoami') {
   console.log('Total Upload: 1931.18 KiB / gzip: 365.97 KiB');
   console.log('Deployed campaign-ops triggers (1.02 sec)');
   console.log('  https://campaign-ops.deb-test.workers.dev');
-  console.log('  schedule: 7 13 * * *');
+  console.log('  schedule: 17 * * * *');
 } else if (cmd === 'secret list --format json') {
   log({ cmd });
   console.log(JSON.stringify(Object.keys(secrets).map((name) => ({ name, type: 'secret_text' }))));

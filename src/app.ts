@@ -5,6 +5,7 @@ import { SandboxBackend } from './backends/sandbox.js';
 import { RouterBackend } from './backends/router.js';
 import { loadGoogleAdsBackend, type GoogleAdsBackend, type GoogleAdsStatus } from './backends/googleAds/index.js';
 import { Engine } from './governance/engine.js';
+import { Autopilot } from './autopilot/autopilot.js';
 import { appVersion } from './util/root.js';
 
 export interface App {
@@ -15,6 +16,8 @@ export interface App {
   googleAds?: GoogleAdsBackend;
   googleAdsStatus: { status: GoogleAdsStatus; message: string };
   engine: Engine;
+  /** Watches the accounts and proposes fixes on its own (rules only on a computer; the cloud adds the free AI). */
+  autopilot: Autopilot;
   version: string;
   uiDir: string;
 }
@@ -29,10 +32,12 @@ export function createApp(env: NodeJS.ProcessEnv = process.env): App {
   if (google.backend) parts.push(google.backend);
   const backend = new RouterBackend(parts);
   const engine = new Engine({ backend, dataDir: config.dataDir, policy: config.policy, scope: config.scope, forceKillSwitch: config.forceKillSwitch });
+  const autopilot = new Autopilot({ engine, backend, dataDir: config.dataDir });
   return {
     config,
     backend,
     sandbox,
+    autopilot,
     googleAds: google.backend,
     googleAdsStatus: { status: google.status, message: google.message },
     engine,

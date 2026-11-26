@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import path from 'node:path';
 import { startConsole } from '../src/console/server.js';
+import { Autopilot } from '../src/autopilot/autopilot.js';
 import { projectRoot } from '../src/util/root.js';
 import { ACCOUNT, AGENT, REASON, budgetChange, makeRig } from './helpers.js';
 import { LIVE_D, liveRig } from './liveRig.js';
@@ -54,8 +55,10 @@ test('approval console security and actions', async () => {
 
     const ok = await request(port, { method: 'POST', path: approvePath, headers: { 'X-Console-Token': TOKEN, 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${port}` }, body: JSON.stringify({ note: 'Looks right' }) });
     assert.equal(ok.status, 200);
+    assert.equal(JSON.parse(ok.body).applied, true, 'approving applies the change straight away');
     const approved = await rig.engine.getProposal(p.id);
-    assert.equal(approved?.status, 'approved');
+    assert.equal(approved?.status, 'applied');
+    assert.equal(approved?.verification?.status, 'passed');
     assert.equal(approved?.approval?.channel, 'console');
     assert.equal(approved?.approval?.note, 'Looks right');
 
@@ -65,6 +68,34 @@ test('approval console security and actions', async () => {
     const kill = await request(port, { method: 'POST', path: '/api/kill-switch', headers: { 'X-Console-Token': TOKEN, 'Content-Type': 'application/json' }, body: JSON.stringify({ on: true }) });
     assert.equal(kill.status, 200);
     assert.equal(rig.engine.killSwitchState().on, true);
+    assert.equal((await request(port, { path: '/api/autopilot', headers: { 'X-Console-Token': TOKEN } })).status, 404, 'no Autopilot unless the console runs one');
+  } finally {
+    await handle.close();
+    rig.cleanup();
+  }
+});
+
+test('approval console: Autopilot settings and Check now', async () => {
+  const rig = makeRig();
+  const autopilot = new Autopilot({ engine: rig.engine, backend: rig.backend, dataDir: rig.dir, clock: () => rig.clock.now });
+  const handle = await startConsole({ engine: rig.engine, backend: rig.backend, token: TOKEN, port: 0, uiDir: path.join(projectRoot(), 'console-ui'), version: 'test', autopilot });
+  const H = { 'X-Console-Token': TOKEN, 'Content-Type': 'application/json' };
+  try {
+    const state = JSON.parse((await request(handle.port, { path: '/api/state', headers: H })).body);
+    assert.equal(state.autopilot.on, true);
+    const report = JSON.parse((await request(handle.port, { path: '/api/autopilot', headers: H })).body);
+    assert.equal(report.skills.length, 14);
+    assert.equal(report.accounts[0].watched, true, 'the sandbox is watched when it is the only account');
+    const bad = await request(handle.port, { method: 'POST', path: '/api/autopilot/settings', headers: H, body: JSON.stringify({ settings: { reviewHour: 31 } }) });
+    assert.equal(bad.status, 400);
+    const saved = JSON.parse((await request(handle.port, { method: 'POST', path: '/api/autopilot/settings', headers: H, body: JSON.stringify({ settings: { reviewHour: 6, skills: { ad_refresh: false } } }) })).body);
+    assert.equal(saved.settings.reviewHour, 6);
+    assert.equal(saved.settings.skills.ad_refresh, false);
+    const checked = JSON.parse((await request(handle.port, { method: 'POST', path: '/api/autopilot/check', headers: H, body: '{}' })).body);
+    assert.ok(checked.feed.some((f: { kind: string }) => f.kind === 'review'));
+    assert.ok(rig.engine.store.list().some((p) => p.requestedBy === 'Autopilot'));
+    const again = await request(handle.port, { method: 'POST', path: '/api/autopilot/check', headers: H, body: '{}' });
+    assert.equal(again.status, 400, 'Check now cannot be hammered');
   } finally {
     await handle.close();
     rig.cleanup();
@@ -119,7 +150,7 @@ test('approval console: live accounts, change windows, Pulse, the witness check 
     assert.equal((await json({ path: '/api/insights?account=999-999-9999', headers: H })).status, 400);
     assert.equal((await json({ path: '/api/insights', headers: H })).status, 400);
 
-    const font = await request(port, { path: '/fonts/source-serif-4-roman.woff2' });
+    const font = await request(port, { path: '/fonts/plus-jakarta-sans.woff2' });
     assert.equal(font.status, 200);
     assert.equal(font.headers['content-type'], 'font/woff2');
     assert.match(font.headers['content-security-policy'] as string, /font-src 'self'/);
