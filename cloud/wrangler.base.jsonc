@@ -1,0 +1,22 @@
+// The Cloudflare settings for Campaign Ops in the cloud.
+// npm run cloud:setup copies this to wrangler.jsonc (not committed) and deploys it.
+// Your secrets (robot key, session key, notification keys) are never in this file.
+{
+  "name": "campaign-ops",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-11-01",
+  // nodejs_compat: the shared engine uses Node's crypto and path, which Workers provide.
+  // global_fetch_strictly_public: the OAuth library needs it to fetch client metadata safely.
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  // Files live in the Durable Object's database, not on a disk.
+  "alias": { "node:fs": "../src/cloud/fs-shim.ts", "fs": "../src/cloud/fs-shim.ts", "node:os": "./src/os-shim.ts" },
+  // The approval console. The Worker runs first so every page gets the security headers.
+  "assets": { "directory": "../console-ui", "binding": "ASSETS", "run_worker_first": true },
+  "durable_objects": { "bindings": [{ "name": "OPS", "class_name": "CampaignOps" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CampaignOps"] }],
+  // Stores OAuth grants for the Claude connector (tokens are kept only as hashes).
+  "kv_namespaces": [{ "binding": "OAUTH_KV" }],
+  // The daily watch: 13:07 UTC is 7:07 in the morning in Chicago (8:07 in summer).
+  "triggers": { "crons": ["7 13 * * *"] },
+  "observability": { "enabled": true }
+}

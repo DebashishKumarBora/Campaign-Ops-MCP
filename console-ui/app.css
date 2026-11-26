@@ -563,6 +563,42 @@ code {
 .gate input { min-height: 44px; border: 1px solid var(--rule-strong); background: var(--sheet); border-radius: 8px; padding: 10px 12px; }
 .gate .error { color: var(--stop); font-weight: 600; margin-top: 12px; }
 
+/* ---------- cloud: passkey sign-in and the connector consent page ---------- */
+
+.gate-cloud { margin-top: 9vh; padding-bottom: 48px; }
+.gate-mark { display: flex; align-items: center; gap: 10px; font: 600 19px/1 var(--serif); color: var(--ink); margin: 0 0 30px; }
+.gate-seal { display: inline-grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: var(--sign-soft); color: var(--sign); }
+.gate label span { display: block; font-weight: 400; font-size: 13px; color: var(--graphite); margin-top: 1px; }
+.gate form label + input { margin-bottom: 8px; }
+#setup-code { font: 600 19px/1.2 ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace; letter-spacing: 0.08em; text-transform: uppercase; }
+.btn-wide { width: 100%; min-height: 50px; margin-top: 8px; font-size: 16px; border-radius: 10px; }
+.gate .gate-fine { font-size: 13.5px; margin-top: 14px; }
+.gate-note { display: flex; align-items: center; gap: 8px; color: var(--sign) !important; font-weight: 600; }
+.gate-cmd { margin: 2px 0 14px !important; }
+.gate .link { margin-top: 4px; }
+.consent h1 { font-size: 30px; }
+.consent-box { background: var(--sheet); border: 1px solid var(--rule); border-radius: 12px; padding: 14px 16px; margin: 20px 0; display: grid; gap: 10px; }
+.consent-box p { margin: 0 !important; color: var(--ink) !important; }
+.consent-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.consent-actions .btn-sign { flex: 1 1 220px; min-height: 50px; font-size: 16px; }
+.consent-actions .btn-quiet { min-height: 50px; }
+.gate .error:empty { display: none; }
+
+/* ---------- cloud: notifications nudge and settings ---------- */
+
+.nudge { background: var(--sign-soft); border: 1px solid color-mix(in srgb, var(--sign) 28%, transparent); border-radius: 12px; padding: 14px 16px; display: grid; gap: 12px; }
+.nudge p { font-size: 14.5px; }
+.nudge strong { font-weight: 650; }
+.nudge-actions, .set-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.set-actions { margin-top: 12px; }
+.list.keys { margin-top: 12px; }
+.list.keys > li { grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; }
+.key-glyph { display: inline-grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: var(--sign-soft); color: var(--sign); }
+.seal-tag { display: inline-block; margin-left: 10px; font: 600 12px/20px var(--sans); color: var(--graphite); border: 1px solid var(--rule-strong); border-radius: 999px; padding: 0 9px; vertical-align: 1px; white-space: nowrap; }
+.seal-tag.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); background: var(--ok-soft); }
+.seal-tag.bad { color: var(--stop); border-color: color-mix(in srgb, var(--stop) 40%, transparent); background: var(--stop-soft); }
+.fp { font-family: ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace; font-size: 0.95em; color: var(--ink); white-space: nowrap; }
+
 /* ---------- toasts ---------- */
 
 .toasts { position: fixed; right: 20px; bottom: 20px; display: grid; gap: 8px; z-index: 40; max-width: min(420px, calc(100vw - 32px)); }
@@ -622,6 +658,11 @@ code {
   .decide-row .btn { flex: 1 1 auto; }
   .list > li { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   .list .end { flex-direction: row; align-items: center; justify-content: space-between; }
+  .list.keys > li { grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; }
+  .list.keys .end { grid-column: 2; justify-content: flex-start; }
+  .list.keys .end:empty { display: none; }
+  .gate-cloud { margin-top: 6vh; }
+  .seal-tag { margin: 4px 0 0; display: table; }
   .watch-head, .watch-part { padding-left: 16px; padding-right: 16px; }
   .figure, .alarm-detail, .steps { margin-left: 0; }
   .odds { margin-left: 0; }

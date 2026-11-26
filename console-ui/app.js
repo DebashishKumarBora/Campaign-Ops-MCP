@@ -1,13 +1,19 @@
 /* Campaign Ops approval console. Plain JavaScript, no build step.
    Every string that came from the AI or an ad account is escaped before it
    touches the page. Nothing is drawn on a timer: the page asks for fresh data
-   every few seconds and redraws only when something actually changed. */
+   every few seconds and redraws only when something actually changed.
+
+   Two ways in. On a computer (npm run console) the page uses a console key.
+   In the cloud it uses passkeys: signing in, and every approval, undo, change
+   window and resume, is signed by the owner's passkey over the exact change. */
 (function () {
   'use strict';
 
   const KEY_NAME = 'campaign-ops-console-key';
   const PICK_NAME = 'campaign-ops-console-account';
-  const POLL_MS = 2500;
+  const LOCAL_POLL_MS = 2500;
+  const CLOUD_POLL_MS = 6000;
+  const NUDGE_NAME = 'campaign-ops-push-nudge';
   const root = document.getElementById('app');
   const modalEl = document.getElementById('modal');
   const toastsEl = document.getElementById('toasts');
@@ -33,6 +39,13 @@
     focusShown: false,
     rowScroll: 0,
     showSelected: true,
+    pollMs: LOCAL_POLL_MS,
+    cloud: false,
+    session: null,
+    gate: { mode: '', busy: false, error: '' },
+    pushHere: null,
+    sigCheck: null,
+    settingsBusy: '',
   };
 
   const ICON = {
@@ -43,6 +56,7 @@
     pulse: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l2.5-6 5 12 2.5-6h4"/></svg>',
     book: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3V4z"/><path d="M5 17a3 3 0 0 1 3-3h11"/></svg>',
     chat: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v11H9l-5 4V5z"/></svg>',
+    key: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M16 7l3 3M14 9l2 2"/></svg>',
   };
 
   const MODE = { sandbox: 'Sandbox', google_ads_test: 'Google Ads test', google_ads: 'Live' };
@@ -85,11 +99,16 @@
     } catch (e) { /* storage blocked: keep it in memory only */ }
   }
 
-  /** #key=... comes from npm run console. #p=P-0007 comes from an approve link in the chat. */
+  /**
+   * #key=... comes from npm run console. #p=P-0007 comes from an approve link in
+   * the chat or a notification. #a=<account> comes from a Pulse or witness
+   * notification and opens that account's Watch page.
+   */
   function readHash() {
     const h = location.hash || '';
     const key = /(?:^|[#&])key=([A-Za-z0-9_-]+)/.exec(h);
     const p = /(?:^|[#&])p=(P-\d{4,})/.exec(h);
+    const a = /(?:^|[#&])a=([A-Za-z0-9-]{3,40})/.exec(h);
     if (key) {
       S.key = key[1];
       store(KEY_NAME, S.key);
@@ -99,7 +118,13 @@
       S.focusShown = false;
       S.tab = 'approve';
     }
-    if (key || p) {
+    if (a) {
+      S.selected = a[1];
+      store(PICK_NAME, a[1]);
+      S.tab = 'watch';
+      S.showSelected = true;
+    }
+    if (key || p || a) {
       try { history.replaceState(null, '', location.pathname); } catch (e) { /* ignore */ }
     }
     if (!S.key) S.key = load(KEY_NAME);
@@ -116,21 +141,36 @@
   }
 
   async function api(method, path, body) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (!S.cloud) headers['X-Console-Token'] = S.key || '';
     const res = await fetch(path, {
       method,
       cache: 'no-store',
-      headers: { 'Content-Type': 'application/json', 'X-Console-Token': S.key || '' },
+      credentials: 'same-origin',
+      headers,
       body: body ? JSON.stringify(body) : undefined,
     });
     let data = {};
     try { data = await res.json(); } catch (e) { /* empty body */ }
     if (res.status === 401) {
-      const err = new Error('That console key did not work.');
+      const err = new Error(S.cloud ? data.error || 'Sign in with your passkey.' : 'That console key did not work.');
       err.auth = true;
       throw err;
     }
     if (!res.ok) throw new Error(data.error || `Request failed (${res.status}).`);
     return data;
+  }
+
+  /** The page lost its sign-in: ask for the key again here, or the passkey in the cloud. */
+  function authLost(message) {
+    if (S.cloud) {
+      const wasIn = Boolean(S.data);
+      S.session = Object.assign({}, S.session, { signedIn: false });
+      renderCloudGate(wasIn ? 'Your sign-in ended. Sign in again to carry on.' : '');
+      return;
+    }
+    forgetKey();
+    renderGate(message);
   }
 
   function sameDay(a, b) {
@@ -369,9 +409,11 @@
     const a = accountById(p.accountId);
     const many = accounts().length > 1;
     const ttl = approvalMinutes();
-    const fine = p.rollbackOf
+    let fine = p.rollbackOf
       ? `Approving lets the AI restore the state before ${esc(p.rollbackOf)}, once, within ${ttl} minutes.`
       : `Approving lets the AI apply this once, within ${ttl} minutes. It is checked again right before it is applied, and you can undo it afterwards.`;
+    if (S.cloud) fine = `Your passkey signs this exact change, fingerprint <span class="fp">${esc(fingerprint(p.bindingHash))}</span>. ${fine}`;
+    const approveLabel = S.cloud ? 'Approve with passkey' : confirming ? 'Confirm approval' : 'Approve change';
     return `<article class="slip${isNew ? ' is-new' : ''}${focused ? ' is-focus' : ''}" id="slip-${esc(p.id)}" aria-label="Proposal ${esc(p.id)}">
       ${focused ? `<p class="from-chat">${ICON.chat}You opened this from the chat.</p>` : ''}
       <div class="slip-head"><span class="pid">${esc(p.id)}</span><span>${esc(p.typeLabel)}</span><span class="grow"></span>${riskTag(p.risk)}</div>
@@ -388,7 +430,7 @@
       <div class="decide">
         <p class="decide-label">Your decision</p>
         <div class="decide-row">
-          <button class="btn btn-sign${confirming ? ' is-confirm' : ''}" data-act="approve" data-id="${esc(p.id)}" data-risk="${esc(p.risk)}">${confirming ? 'Confirm approval' : 'Approve change'}</button>
+          <button class="btn btn-sign${confirming ? ' is-confirm' : ''}" data-act="approve" data-id="${esc(p.id)}" data-risk="${esc(p.risk)}">${approveLabel}</button>
           <button class="btn btn-quiet" data-act="reject" data-id="${esc(p.id)}">Reject</button>
           <input class="note" data-note="${esc(p.id)}" maxlength="300" placeholder="Note for the record (optional)" aria-label="Note for ${esc(p.id)}" value="${esc(S.notes[p.id] || '')}">
         </div>
@@ -427,7 +469,16 @@
   }
 
   function signature(p) {
-    if (p.approval && p.approval.at) return `<p class="signature">Signed by ${esc(p.approval.by)} at ${esc(clock(p.approval.at))}</p>`;
+    if (p.approval && p.approval.at) {
+      const ev = p.approval.evidence;
+      const checked = S.sigCheck && S.sigCheck.byId[p.id];
+      const seal = ev && ev.kind === 'passkey'
+        ? checked
+          ? checked.valid ? '<span class="seal-tag ok">✓ Signature checks out</span>' : `<span class="seal-tag bad">✕ ${esc(checked.reason || 'Signature does not check out')}</span>`
+          : '<span class="seal-tag">Passkey signature</span>'
+        : '';
+      return `<p class="signature">Signed by ${esc(p.approval.by)} at ${esc(clock(p.approval.at))}${seal}</p>`;
+    }
     if (p.rejection && p.rejection.at) return `<p class="signature muted">Rejected by ${esc(p.rejection.by)} at ${esc(clock(p.rejection.at))}</p>`;
     return '';
   }
@@ -455,7 +506,7 @@
           <div class="end">
             <span class="when">${esc(clock(when))}</span>
             ${canUndo && locked ? '<span class="state muted">Undo needs a change window</span>' : ''}
-            ${canUndo && !locked ? `<button class="btn btn-quiet btn-small${confirming ? ' is-confirm' : ''}" data-act="undo" data-id="${esc(p.id)}">${confirming ? 'Confirm undo' : 'Undo'}</button>` : ''}
+            ${canUndo && !locked ? `<button class="btn btn-quiet btn-small${confirming ? ' is-confirm' : ''}" data-act="undo" data-id="${esc(p.id)}">${S.cloud ? 'Undo with passkey' : confirming ? 'Confirm undo' : 'Undo'}</button>` : ''}
           </div>
         </li>`;
       })
@@ -502,6 +553,10 @@
     change_window_opened: 'Opened a change window',
     change_window_closed: 'Locked a live account early',
     setup_changes: 'Setup built the sample campaigns',
+    passkey_added: 'Added a passkey',
+    passkey_removed: 'Removed a passkey',
+    connector_authorized: 'Allowed an AI app to connect',
+    history_imported: 'Moved the history from the computer',
   };
 
   function auditList(audit) {
@@ -727,7 +782,7 @@
     const kill = d.killSwitch;
     const confirming = confirmFor('resume', 'all');
     const power = kill.on
-      ? `<span class="power-state is-paused"><span class="dot" aria-hidden="true"></span>Changes paused</span>${kill.forcedByEnv ? '' : `<button class="btn btn-sign btn-small${confirming ? ' is-confirm' : ''}" data-act="resume" data-id="all">${confirming ? 'Confirm resume' : 'Resume changes'}</button>`}`
+      ? `<span class="power-state is-paused"><span class="dot" aria-hidden="true"></span>Changes paused</span>${kill.forcedByEnv ? '' : `<button class="btn btn-sign btn-small${confirming ? ' is-confirm' : ''}" data-act="resume" data-id="all">${S.cloud ? 'Resume<span class="wide-only"> with passkey</span>' : confirming ? 'Confirm resume' : 'Resume changes'}</button>`}`
       : '<span class="power-state"><span class="dot" aria-hidden="true"></span>Changes on</span><button class="btn btn-stop btn-small" data-act="pause" data-id="all"><span>Pause<span class="wide-only"> all changes</span></span></button>';
     return `<header class="top"><div class="top-inner">
       <div class="wordmark"><span class="wordmark-name">Campaign Ops</span><span class="wordmark-sub">Approval console</span></div>
@@ -788,6 +843,7 @@
       ${heroHtml(d)}
       <div class="layout">
         <div class="main">
+          ${nudgeHtml(d)}
           <section data-pane="approve" aria-labelledby="h-pending">
             <h2 class="block-title" id="h-pending">Waiting for you <span class="count">${pending.length || ''}</span></h2>
             ${pending.length ? pending.map((p) => slip(p, newIds.has(p.id))).join('') : '<div class="empty"><p>Nothing to approve.</p><p>When the AI proposes a change, it appears here within a few seconds. Approve links in the chat open it directly.</p></div>'}
@@ -807,6 +863,7 @@
             <h2 class="block-title" id="h-audit">Audit log <span class="end chain ${d.audit.ok ? 'ok' : 'bad'}">${d.audit.ok ? '✓ Chain intact' : '✕ Chain broken'}</span></h2>
             ${auditList(d.audit)}
           </section>
+          ${settingsHtml(d)}
           <p class="foot" data-pane="record">${esc(footNote(d))}</p>
         </div>
       </div>
@@ -900,7 +957,7 @@
         <input class="confirm-input" id="dlg-confirm" autocomplete="off" spellcheck="false" value="${esc(m.typed)}">
         ${m.error ? `<p class="dialog-error" role="alert">${esc(m.error)}</p>` : ''}
         <div class="dialog-actions">
-          <button type="button" class="btn btn-sign" data-act="window-open"${ok ? '' : ' disabled'}>${m.busy ? 'Opening' : 'Open change window'}</button>
+          <button type="button" class="btn btn-sign" data-act="window-open"${ok ? '' : ' disabled'}>${m.busy ? 'Opening' : S.cloud ? 'Open with passkey' : 'Open change window'}</button>
           <button type="button" class="btn btn-quiet" data-act="modal-close">Cancel</button>
         </div>
       </div>`;
@@ -915,7 +972,8 @@
     m.error = '';
     renderModal();
     try {
-      await api('POST', `/api/accounts/${encodeURIComponent(m.accountId)}/window`, { hours: m.hours, confirm: m.typed });
+      const proof = S.cloud ? await passkeyProof('open_window', m.accountId, { hours: m.hours }) : undefined;
+      await api('POST', `/api/accounts/${encodeURIComponent(m.accountId)}/window`, { hours: m.hours, confirm: m.typed, proof });
       closeModal();
       toast(`Change window open for ${a.name}. Approved changes can be applied now.`);
       await refresh(true);
@@ -923,12 +981,11 @@
       if (e.auth) {
         S.modal = null;
         renderModal();
-        forgetKey();
-        renderGate(e.message);
+        authLost(e.message);
         return;
       }
       m.busy = false;
-      m.error = e.message;
+      m.error = passkeyMessage(e);
       renderModal();
       const input = document.getElementById('dlg-confirm');
       if (input) input.focus();
@@ -981,8 +1038,7 @@
       S.insights[id] = { data };
     } catch (e) {
       if (e.auth) {
-        forgetKey();
-        renderGate(e.message);
+        authLost(e.message);
         return;
       }
       S.insights[id] = { data: cur.data, error: e.message };
@@ -1041,8 +1097,13 @@
       openModal(id);
       return;
     }
+    if (SETTINGS_ACTIONS[action]) {
+      settingsAction(action, id, button);
+      return;
+    }
     if (S.busy) return;
-    const needsConfirm = (action === 'approve' && button && button.dataset.risk === 'high') || action === 'undo' || action === 'resume';
+    // In the cloud the passkey prompt is the deliberate second step, so there is no extra Confirm click.
+    const needsConfirm = !S.cloud && ((action === 'approve' && button && button.dataset.risk === 'high') || action === 'undo' || action === 'resume');
     if (needsConfirm && !confirmFor(action, id)) {
       setConfirm(action, id);
       return;
@@ -1051,27 +1112,30 @@
     S.busy = true;
     if (button) button.disabled = true;
     try {
+      // In the cloud, approving, undoing and resuming each need a passkey signature over exactly this action.
+      const proof = S.cloud && SIGNED[action] ? await passkeyProof(SIGNED[action], action === 'resume' ? 'all' : id) : undefined;
       if (action === 'approve') {
-        await api('POST', `/api/proposals/${encodeURIComponent(id)}/approve`, { note: S.notes[id] || undefined });
+        await api('POST', `/api/proposals/${encodeURIComponent(id)}/approve`, { note: S.notes[id] || undefined, proof });
         delete S.notes[id];
         if (S.focus === id) S.focus = null;
         const p = S.data.proposals.find((x) => x.id === id);
         const a = p && accountById(p.accountId);
-        toast(isLive(a) && !a.access.open ? `Approved ${id}. Open a change window so it can be applied.` : `Approved ${id}. The AI can apply it now.`);
+        const done = proof ? `Approved and signed ${id}.` : `Approved ${id}.`;
+        toast(isLive(a) && !a.access.open ? `${done} Open a change window so it can be applied.` : `${done} The AI can apply it now.`);
       } else if (action === 'reject') {
         await api('POST', `/api/proposals/${encodeURIComponent(id)}/reject`, { note: S.notes[id] || undefined });
         delete S.notes[id];
         if (S.focus === id) S.focus = null;
         toast(`Rejected ${id}.`);
       } else if (action === 'undo') {
-        const res = await api('POST', `/api/proposals/${encodeURIComponent(id)}/undo`, {});
+        const res = await api('POST', `/api/proposals/${encodeURIComponent(id)}/undo`, { proof });
         if (res.ok) toast(`Undone. ${id} was reverted by ${res.rollback.id}.`);
         else toast(res.message || 'Undo did not complete.', true);
       } else if (action === 'pause') {
         await api('POST', '/api/kill-switch', { on: true });
         toast('All changes paused.');
       } else if (action === 'resume') {
-        await api('POST', '/api/kill-switch', { on: false });
+        await api('POST', '/api/kill-switch', { on: false, proof });
         toast('Changes resumed.');
       } else if (action === 'window-close') {
         await api('POST', `/api/accounts/${encodeURIComponent(id)}/window/close`, {});
@@ -1080,11 +1144,10 @@
       }
     } catch (e) {
       if (e.auth) {
-        forgetKey();
-        renderGate(e.message);
+        authLost(e.message);
         return;
       }
-      toast(e.message, true);
+      toast(passkeyMessage(e), true);
     } finally {
       S.busy = false;
     }
@@ -1135,6 +1198,505 @@
     document.getElementById('gate-key').focus();
   }
 
+  // ---------- cloud: passkeys ----------
+
+  /** The actions that need a passkey signature in the cloud, and what the server calls them. */
+  const SIGNED = { approve: 'approve', undo: 'undo', resume: 'resume_all' };
+
+  function b64urlToBuf(s) {
+    const text = String(s).replace(/-/g, '+').replace(/_/g, '/');
+    const bin = atob(text + '==='.slice((text.length + 3) % 4));
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out.buffer;
+  }
+
+  function bufToB64url(buf) {
+    const u = new Uint8Array(buf);
+    let bin = '';
+    for (let i = 0; i < u.length; i++) bin += String.fromCharCode(u[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  function passkeysSupported() {
+    return Boolean(window.PublicKeyCredential && navigator.credentials && window.isSecureContext);
+  }
+
+  function credentialList(list) {
+    return (list || []).map((c) => ({ type: 'public-key', id: b64urlToBuf(c.id), transports: c.transports }));
+  }
+
+  /** Makes a new passkey on this device from the server's options. */
+  async function createPasskey(o) {
+    const cred = await navigator.credentials.create({
+      publicKey: {
+        rp: o.rp,
+        user: { id: b64urlToBuf(o.user.id), name: o.user.name, displayName: o.user.displayName },
+        challenge: b64urlToBuf(o.challenge),
+        pubKeyCredParams: o.pubKeyCredParams,
+        timeout: o.timeout,
+        attestation: o.attestation,
+        authenticatorSelection: o.authenticatorSelection,
+        excludeCredentials: credentialList(o.excludeCredentials),
+      },
+    });
+    const r = cred.response;
+    return {
+      id: cred.id,
+      rawId: bufToB64url(cred.rawId),
+      type: cred.type,
+      response: {
+        clientDataJSON: bufToB64url(r.clientDataJSON),
+        attestationObject: bufToB64url(r.attestationObject),
+        transports: typeof r.getTransports === 'function' ? r.getTransports() : undefined,
+      },
+    };
+  }
+
+  /** Signs the server's challenge with a passkey (Face ID, Touch ID, Windows Hello or a security key). */
+  async function usePasskey(o) {
+    const cred = await navigator.credentials.get({
+      publicKey: {
+        challenge: b64urlToBuf(o.challenge),
+        rpId: o.rpId,
+        timeout: o.timeout,
+        userVerification: o.userVerification,
+        allowCredentials: credentialList(o.allowCredentials),
+      },
+    });
+    const r = cred.response;
+    return {
+      id: cred.id,
+      rawId: bufToB64url(cred.rawId),
+      type: cred.type,
+      response: {
+        clientDataJSON: bufToB64url(r.clientDataJSON),
+        authenticatorData: bufToB64url(r.authenticatorData),
+        signature: bufToB64url(r.signature),
+        userHandle: r.userHandle ? bufToB64url(r.userHandle) : null,
+      },
+    };
+  }
+
+  /** A passkey signature for one action. The server decides what is signed: for an approval, the exact change. */
+  async function passkeyProof(purpose, target, extra) {
+    const o = await api('POST', '/api/passkey/options', Object.assign({ purpose, target }, extra || {}));
+    const assertion = await usePasskey(o.options);
+    return { challengeId: o.challengeId, assertion };
+  }
+
+  function passkeyMessage(e) {
+    if (e && e.name === 'NotAllowedError') return 'The passkey was cancelled or timed out. Nothing was signed.';
+    if (e && e.name === 'InvalidStateError') return 'This device already has a passkey for Campaign Ops.';
+    if (e && e.name === 'SecurityError') return 'Passkeys need this page at its own https address.';
+    return (e && e.message) || 'Something went wrong. Try again.';
+  }
+
+  /** The first 8 characters of the change's fingerprint, as a person can compare it. */
+  function fingerprint(hash) {
+    const h = String(hash || '').slice(0, 8).toUpperCase();
+    return h.length === 8 ? `${h.slice(0, 4)} ${h.slice(4)}` : h;
+  }
+
+  function guessDevice() {
+    const ua = navigator.userAgent || '';
+    if (/iPhone/.test(ua)) return 'iPhone';
+    if (/iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return 'iPad';
+    if (/Android/.test(ua)) return /Mobile/.test(ua) ? 'Android phone' : 'Android tablet';
+    if (/Macintosh/.test(ua)) return 'Mac';
+    if (/Windows/.test(ua)) return 'Windows PC';
+    if (/CrOS/.test(ua)) return 'Chromebook';
+    if (/Linux/.test(ua)) return 'Linux computer';
+    return 'This device';
+  }
+
+  function isIos() {
+    const ua = navigator.userAgent || '';
+    return /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+  }
+
+  function isInstalled() {
+    return window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  }
+
+  async function postJson(path, body) {
+    const res = await fetch(path, { method: 'POST', cache: 'no-store', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+    let data = {};
+    try { data = await res.json(); } catch (e) { /* empty body */ }
+    if (!res.ok) throw new Error(data.error || `Request failed (${res.status}).`);
+    return data;
+  }
+
+  async function loadSession() {
+    try {
+      const res = await fetch('/auth/session', { cache: 'no-store', credentials: 'same-origin' });
+      S.session = await res.json();
+    } catch (e) {
+      S.session = { signedIn: false, hasPasskeys: true, setupOpen: false, offline: true };
+    }
+  }
+
+  // ---------- cloud: the sign-in gate ----------
+
+  function gateShell(inner) {
+    return `<main class="gate gate-cloud">
+      <p class="gate-mark"><span class="gate-seal" aria-hidden="true">${ICON.key}</span>Campaign Ops</p>
+      ${inner}
+      ${S.gate.error ? `<p class="error" role="alert">${esc(S.gate.error)}</p>` : ''}
+    </main>`;
+  }
+
+  function renderCloudGate(message) {
+    stopPolling();
+    S.data = null;
+    S.booted = false;
+    S.sig = '';
+    root.dataset.tab = 'approve';
+    if (message !== undefined) S.gate.error = message;
+    const s = S.session || {};
+    const focus = S.focus ? `<p class="gate-note">${ICON.chat}<span>Sign in to see ${esc(S.focus)}.</span></p>` : '';
+    let inner;
+    if (s.offline) {
+      inner = '<h1>Cannot reach Campaign Ops</h1><p>Check your connection, then reload this page.</p>';
+    } else if (!passkeysSupported()) {
+      inner = '<h1>This browser cannot use passkeys</h1><p>Open this page in a current version of Safari, Chrome, Edge or Firefox.</p>';
+    } else if (!s.hasPasskeys || S.gate.mode === 'setup') {
+      inner = s.setupOpen ? setupFormHtml(s) : `<h1>Setup is closed</h1>
+        <p>A setup code works once, for one hour. On your computer, in the campaign-ops-mcp folder, run:</p>
+        <p class="gate-cmd"><code>npm run cloud:code</code></p>
+        <p>It prints a new code. Then reload this page.</p>
+        ${s.hasPasskeys ? '<button class="link" type="button" data-gate="signin">Sign in with a passkey instead</button>' : ''}`;
+    } else {
+      inner = `<h1>Sign in to approve changes</h1>
+        <p>Your passkey signs you in. Every approval you give is signed by it too.</p>
+        ${focus}
+        <button class="btn btn-sign btn-wide" type="button" data-gate="login"${S.gate.busy ? ' disabled' : ''}>${S.gate.busy ? 'Waiting for your passkey' : 'Sign in with passkey'}</button>
+        <p class="gate-fine">On a computer without your passkey, pick the option to use a phone, then scan the code with the phone that has it. Afterwards you can add this computer in Record.</p>
+        ${s.setupOpen ? '<button class="link" type="button" data-gate="setup">I have a setup code</button>' : ''}`;
+    }
+    root.innerHTML = gateShell(inner);
+    const first = root.querySelector('#setup-code');
+    if (first && !first.value) first.focus();
+  }
+
+  function setupFormHtml(s) {
+    return `<h1>${s.hasPasskeys ? 'Add a passkey with a setup code' : 'Set up your passkey'}</h1>
+      <p>A passkey lives on this device and opens with your face, fingerprint or screen lock. Only it can approve changes, undo them, or unlock a live account.</p>
+      <form id="setup-form" autocomplete="off" novalidate>
+        <label for="setup-code">Setup code<span>Printed on your computer by npm run cloud:setup</span></label>
+        <input id="setup-code" name="code" required autocapitalize="characters" autocomplete="one-time-code" spellcheck="false" maxlength="20">
+        <label for="setup-name">Your name<span>Shown on every approval you sign</span></label>
+        <input id="setup-name" name="name" required maxlength="40" autocomplete="given-name" value="${esc(s.owner || '')}">
+        <label for="setup-device">This device</label>
+        <input id="setup-device" name="device" required maxlength="40" value="${esc(guessDevice())}">
+        <button class="btn btn-sign btn-wide" type="submit"${S.gate.busy ? ' disabled' : ''}>${S.gate.busy ? 'Waiting for your passkey' : 'Create passkey'}</button>
+      </form>
+      ${s.hasPasskeys ? '<button class="link" type="button" data-gate="signin">Sign in with a passkey instead</button>' : ''}`;
+  }
+
+  async function gateLogin() {
+    if (S.gate.busy) return;
+    S.gate.busy = true;
+    S.gate.error = '';
+    renderCloudGate();
+    try {
+      const o = await postJson('/auth/login/options', {});
+      const assertion = await usePasskey(o.options);
+      const done = await postJson('/auth/login/finish', { challengeId: o.challengeId, assertion });
+      S.session = Object.assign({}, S.session, { signedIn: true, owner: done.owner });
+      S.gate.busy = false;
+      S.gate.mode = '';
+      await refresh(true);
+      return;
+    } catch (e) {
+      S.gate.error = passkeyMessage(e);
+    }
+    S.gate.busy = false;
+    renderCloudGate();
+  }
+
+  async function gateSetup(form) {
+    if (S.gate.busy) return;
+    const code = form.elements.code.value.trim();
+    const name = form.elements.name.value.trim();
+    const device = form.elements.device.value.trim();
+    if (!code || !name || !device) {
+      S.gate.error = 'Fill in the setup code, your name and this device.';
+      renderCloudGate();
+      return;
+    }
+    S.gate.busy = true;
+    S.gate.error = '';
+    const keep = { code, name, device };
+    renderCloudGate();
+    try {
+      const o = await postJson('/auth/setup/options', { code, name });
+      const credential = await createPasskey(o.options);
+      const done = await postJson('/auth/setup/finish', { challengeId: o.challengeId, credential, device });
+      S.session = { signedIn: true, owner: name, hasPasskeys: true, setupOpen: false };
+      S.gate.busy = false;
+      S.gate.mode = '';
+      toast(`Passkey created on ${done.passkey}. You are signed in.`);
+      await refresh(true);
+      return;
+    } catch (e) {
+      S.gate.error = passkeyMessage(e);
+    }
+    S.gate.busy = false;
+    renderCloudGate();
+    const f = document.getElementById('setup-form');
+    if (f) {
+      f.elements.code.value = keep.code;
+      f.elements.name.value = keep.name;
+      f.elements.device.value = keep.device;
+    }
+  }
+
+  root.addEventListener('submit', (ev) => {
+    if (ev.target && ev.target.id === 'setup-form') {
+      ev.preventDefault();
+      gateSetup(ev.target);
+    }
+  });
+
+  root.addEventListener('click', (ev) => {
+    const g = ev.target.closest('[data-gate]');
+    if (!g) return;
+    if (g.dataset.gate === 'login') gateLogin();
+    if (g.dataset.gate === 'setup' || g.dataset.gate === 'signin') {
+      S.gate.mode = g.dataset.gate === 'setup' ? 'setup' : '';
+      S.gate.error = '';
+      renderCloudGate();
+    }
+  });
+
+  // ---------- cloud: notifications ----------
+
+  let swReg = null;
+
+  async function serviceWorker() {
+    if (!('serviceWorker' in navigator)) return null;
+    if (!swReg) swReg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+    return swReg;
+  }
+
+  function pushSupported() {
+    return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  }
+
+  async function checkPushHere() {
+    if (!pushSupported()) {
+      S.pushHere = false;
+      return;
+    }
+    try {
+      const reg = await serviceWorker();
+      const sub = reg ? await reg.pushManager.getSubscription() : null;
+      S.pushHere = Boolean(sub) && Notification.permission === 'granted';
+    } catch (e) {
+      S.pushHere = false;
+    }
+    if (S.data) softRender();
+  }
+
+  async function pushOn() {
+    // Ask first, straight from the tap: Safari only shows the question then.
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') {
+      throw new Error(permission === 'denied' ? 'Notifications are blocked for this site. Allow them in your browser or phone settings, then try again.' : 'Notifications were not turned on.');
+    }
+    const key = S.data && S.data.cloud && S.data.cloud.push && S.data.cloud.push.publicKey;
+    if (!key) throw new Error('Notifications are not set up on the server. Run npm run cloud:setup again on your computer.');
+    const reg = await serviceWorker();
+    await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64urlToBuf(key) });
+    await api('POST', '/api/push/subscribe', { subscription: sub.toJSON(), device: guessDevice() });
+    S.pushHere = true;
+    store(NUDGE_NAME, 'done');
+  }
+
+  async function pushOff() {
+    const reg = await serviceWorker();
+    const sub = reg ? await reg.pushManager.getSubscription() : null;
+    if (sub) {
+      await api('POST', '/api/push/unsubscribe', { endpoint: sub.endpoint });
+      await sub.unsubscribe();
+    }
+    S.pushHere = false;
+  }
+
+  /** A one-time card on the Approve page: the phone can say when a change needs you. */
+  function nudgeHtml(d) {
+    if (!S.cloud || !d.cloud || S.pushHere !== false || load(NUDGE_NAME)) return '';
+    const iosBrowser = isIos() && !isInstalled();
+    if (!pushSupported() && !iosBrowser) return '';
+    const body = iosBrowser
+      ? '<p><strong>Get a tap on the shoulder when a change needs you.</strong> On iPhone, add Campaign Ops to your Home Screen first: tap Share, then Add to Home Screen, and open it from there.</p>'
+      : '<p><strong>Get a tap on the shoulder when a change needs you.</strong> Notifications come from your own Campaign Ops, for new proposals and the morning check.</p>';
+    return `<div class="nudge" data-pane="approve">
+      ${body}
+      <div class="nudge-actions">
+        ${iosBrowser ? '' : '<button class="btn btn-sign btn-small" data-act="push-on">Turn on notifications</button>'}
+        <button class="btn btn-quiet btn-small" data-act="nudge-hide">Not now</button>
+      </div>
+    </div>`;
+  }
+
+  // ---------- cloud: settings ----------
+
+  const SETTINGS_ACTIONS = { 'push-on': 1, 'push-off': 1, 'push-test': 1, 'nudge-hide': 1, 'passkey-add': 1, 'passkey-remove': 1, 'sig-check': 1, signout: 1 };
+
+  function shortDate(iso) {
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString([], { month: 'short', day: 'numeric', year: d.getFullYear() === new Date().getFullYear() ? undefined : 'numeric' });
+  }
+
+  function settingsHtml(d) {
+    if (!S.cloud || !d.cloud) return '';
+    const c = d.cloud;
+    const busy = S.settingsBusy;
+    const keys = c.passkeys || [];
+    const keyRows = keys
+      .map((k) => {
+        const confirming = confirmFor('passkey-remove', k.id);
+        const used = k.lastUsedAt ? ` Last used ${clock(k.lastUsedAt)}.` : '';
+        return `<li>
+          <span class="key-glyph" aria-hidden="true">${ICON.key}</span>
+          <div><p class="what">${esc(k.name)}</p><p class="sub">Added ${esc(shortDate(k.createdAt))}.${esc(used)}</p></div>
+          <div class="end">${keys.length > 1 ? `<button class="btn btn-quiet btn-small${confirming ? ' is-confirm' : ''}" data-act="passkey-remove" data-id="${esc(k.id)}"${busy ? ' disabled' : ''}>${confirming ? 'Remove with passkey' : 'Remove'}</button>` : ''}</div>
+        </li>`;
+      })
+      .join('');
+    const devices = (c.push && c.push.devices) || [];
+    let pushBody;
+    if (!c.push || !c.push.publicKey) {
+      pushBody = '<p class="part-lead">Notifications are not set up on the server. Run npm run cloud:setup again on your computer.</p>';
+    } else if (!pushSupported()) {
+      pushBody = isIos() && !isInstalled()
+        ? '<p class="part-lead">On iPhone, notifications work once Campaign Ops is on your Home Screen. Tap Share, then Add to Home Screen, and open it from there.</p>'
+        : '<p class="part-lead">This browser cannot receive notifications.</p>';
+    } else if (S.pushHere) {
+      pushBody = `<p class="quiet-line">✓ On for this device</p>
+        <div class="set-actions">
+          <button class="btn btn-quiet btn-small" data-act="push-test"${busy ? ' disabled' : ''}>Send a test</button>
+          <button class="btn btn-quiet btn-small" data-act="push-off"${busy ? ' disabled' : ''}>Turn off here</button>
+        </div>`;
+    } else {
+      pushBody = `<p class="part-lead">Off for this device.</p>
+        <div class="set-actions"><button class="btn btn-sign btn-small" data-act="push-on"${busy ? ' disabled' : ''}>Turn on notifications</button></div>`;
+    }
+    const deviceLine = devices.length ? `<p class="small-note">${esc(countWord(devices.length))} ${plural(devices.length, 'device gets', 'devices get')} notifications: ${esc(devices.map((x) => x.device).join(', '))}.</p>` : '';
+    const sig = S.sigCheck;
+    let sigBody = '<p class="part-lead">Every approval and undo here carries a passkey signature over the exact change. The server keeps the signatures and can check them again at any time.</p>';
+    if (sig) {
+      const allGood = sig.total === 1 ? 'The signature checks out.' : sig.total === 2 ? 'Both signatures check out.' : `All ${sig.total} signatures check out.`;
+      const bad = sig.total - sig.valid;
+      sigBody += sig.total
+        ? `<p class="${bad ? 'error-text' : 'quiet-line'}">${bad ? '' : '✓ '}${esc(bad ? `${bad} of ${sig.total} ${plural(sig.total, 'signature does', 'signatures do')} not check out. The marks in Decisions and changes show which.` : allGood)}</p>`
+        : '<p class="part-lead">No signed approvals yet.</p>';
+    }
+    sigBody += `<div class="set-actions"><button class="btn btn-quiet btn-small" data-act="sig-check"${busy ? ' disabled' : ''}>${busy === 'sig-check' ? 'Checking' : 'Check every signature'}</button></div>`;
+    return `<section class="watch settings" data-pane="record" aria-labelledby="h-settings">
+      <div class="watch-head">
+        <h2 class="watch-title" id="h-settings">Passkeys and notifications</h2>
+        <p class="watch-checked"><span>Signed in as ${esc(c.owner)}.</span><button class="link" data-act="signout"${busy ? ' disabled' : ''}>Sign out</button></p>
+      </div>
+      <div class="watch-part">
+        <h3 class="part-title">Passkeys</h3>
+        <p class="part-lead">Approving, undoing, opening a change window and resuming changes each need one of these.</p>
+        <ul class="list keys">${keyRows}</ul>
+        <div class="set-actions"><button class="btn btn-quiet btn-small" data-act="passkey-add"${busy ? ' disabled' : ''}>${busy === 'passkey-add' ? 'Waiting for your passkey' : 'Add a passkey on this device'}</button></div>
+        ${keys.length === 1 ? '<p class="small-note">Add a second device so losing one never locks you out.</p>' : ''}
+      </div>
+      <div class="watch-part">
+        <h3 class="part-title">Notifications</h3>
+        ${pushBody}
+        ${deviceLine}
+      </div>
+      <div class="watch-part">
+        <h3 class="part-title">Signatures</h3>
+        ${sigBody}
+      </div>
+    </section>`;
+  }
+
+  async function addPasskeyHere() {
+    let o;
+    try {
+      o = await postJson('/auth/passkeys/add/options', {});
+    } catch (e) {
+      // Adding needs a fresh sign-in: sign in again, then carry on.
+      if (!/Sign in again/.test(e.message)) throw e;
+      toast('Confirm with a passkey you already have first.');
+      const lo = await postJson('/auth/login/options', {});
+      const assertion = await usePasskey(lo.options);
+      await postJson('/auth/login/finish', { challengeId: lo.challengeId, assertion });
+      o = await postJson('/auth/passkeys/add/options', {});
+    }
+    const credential = await createPasskey(o.options);
+    const done = await postJson('/auth/passkeys/add/finish', { challengeId: o.challengeId, credential, device: guessDevice() });
+    toast(`Passkey added on ${done.passkey}.`);
+  }
+
+  async function settingsAction(action, id, button) {
+    if (action === 'nudge-hide') {
+      store(NUDGE_NAME, 'hidden');
+      render();
+      return;
+    }
+    if (action === 'passkey-remove' && !confirmFor(action, id)) {
+      setConfirm(action, id);
+      return;
+    }
+    if (S.settingsBusy) return;
+    S.confirm = null;
+    S.settingsBusy = action;
+    if (button) button.disabled = true;
+    try {
+      if (action === 'signout') {
+        await postJson('/auth/logout', {});
+        S.settingsBusy = '';
+        S.session = Object.assign({}, S.session, { signedIn: false });
+        S.gate.mode = '';
+        S.tab = 'approve';
+        S.sigCheck = null;
+        renderCloudGate('');
+        return;
+      }
+      if (action === 'push-on') {
+        await pushOn();
+        toast('Notifications are on for this device.');
+      } else if (action === 'push-off') {
+        await pushOff();
+        toast('Notifications are off for this device.');
+      } else if (action === 'push-test') {
+        const r = await api('POST', '/api/push/test', {});
+        toast(r.sent ? `Test sent to ${r.sent} ${plural(r.sent, 'device')}.` : 'The test did not go out. Turn notifications off and on again.', !r.sent);
+      } else if (action === 'passkey-add') {
+        await addPasskeyHere();
+      } else if (action === 'passkey-remove') {
+        const proof = await passkeyProof('remove_passkey', id);
+        await api('POST', '/api/passkeys/remove', { id, proof });
+        toast('Passkey removed.');
+      } else if (action === 'sig-check') {
+        const r = await api('GET', '/api/signatures');
+        const byId = {};
+        for (const x of r.signatures || []) byId[x.proposalId] = x;
+        S.sigCheck = { total: r.total, valid: r.valid, byId };
+      }
+    } catch (e) {
+      if (e.auth) {
+        S.settingsBusy = '';
+        authLost(e.message);
+        return;
+      }
+      toast(passkeyMessage(e), true);
+    }
+    S.settingsBusy = '';
+    await refresh(true);
+  }
+
   // ---------- data ----------
 
   function dataSignature(data) {
@@ -1144,7 +1706,8 @@
   }
 
   async function refresh(force) {
-    if (!S.key) return renderGate('');
+    if (!S.cloud && !S.key) return renderGate('');
+    if (S.cloud && !(S.session && S.session.signedIn)) return renderCloudGate('');
     try {
       const data = await api('GET', '/api/state');
       const sig = dataSignature(data);
@@ -1160,20 +1723,16 @@
       if (first) loadAllInsights();
       startPolling();
     } catch (e) {
-      if (e.auth) {
-        forgetKey();
-        renderGate(e.message);
-      } else {
-        toast(`Cannot reach Campaign Ops: ${e.message}`, true);
-      }
+      if (e.auth) authLost(e.message);
+      else toast(`Cannot reach Campaign Ops: ${e.message}`, true);
     }
   }
 
   function startPolling() {
     if (S.timer) return;
     S.timer = setInterval(() => {
-      if (!document.hidden && !S.busy) refresh(false);
-    }, POLL_MS);
+      if (!document.hidden && !S.busy && !S.settingsBusy) refresh(false);
+    }, S.pollMs);
   }
 
   function stopPolling() {
@@ -1182,16 +1741,42 @@
   }
 
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && S.key) refresh(false);
+    const signedIn = S.cloud ? Boolean(S.session && S.session.signedIn) : Boolean(S.key);
+    if (!document.hidden && signedIn) refresh(false);
   });
 
   window.addEventListener('hashchange', () => {
     readHash();
-    if (S.data) {
-      render();
+    if (S.data && root.querySelector('.layout')) {
+      if (S.selected && !S.insights[S.selected]) loadInsights(S.selected, false);
+      window.scrollTo(0, 0);
+      // Fresh data first: an approve link or a notification is often about a proposal made seconds ago.
+      refresh(true);
+    } else if (S.cloud && !(S.session && S.session.signedIn)) {
+      renderCloudGate();
     }
   });
 
-  readHash();
-  refresh(true);
+  /** Asks the server which sign-in it uses, then starts. */
+  async function boot() {
+    readHash();
+    try {
+      const res = await fetch('/mode', { cache: 'no-store' });
+      const m = res.ok ? await res.json() : {};
+      S.cloud = m.mode === 'cloud';
+    } catch (e) {
+      S.cloud = false;
+    }
+    if (!S.cloud) {
+      refresh(true);
+      return;
+    }
+    S.pollMs = CLOUD_POLL_MS;
+    serviceWorker().then(checkPushHere).catch(() => undefined);
+    await loadSession();
+    if (S.session && S.session.signedIn) refresh(true);
+    else renderCloudGate('');
+  }
+
+  boot();
 })();
