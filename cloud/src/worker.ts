@@ -12,12 +12,12 @@ export { CampaignOps } from './ops.js';
  *   /oauth/token, /oauth/register, /.well-known/*   served by the OAuth library
  *   /, /app.js, ...      the approval console (static files)
  *   /api/*, /auth/*      the console's API and passkey sign-in (in the Durable Object)
- *   cron                 the daily watch: Pulse and the witness check, with phone notifications
+ *   cron                 Autopilot's hourly tick: the watch, the daily review, notifications
  */
 
 const SCOPE = 'campaign-ops';
 
-const STATIC = new Set(['/', '/index.html', '/app.js', '/app.css', '/sw.js', '/manifest.webmanifest', '/consent.js']);
+const STATIC = new Set(['/', '/index.html', '/app.js', '/app.css', '/theme.js', '/sw.js', '/manifest.webmanifest', '/consent.js']);
 const isStatic = (path: string) => STATIC.has(path) || path.startsWith('/fonts/') || path.startsWith('/icons/');
 
 const BASE_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
@@ -42,7 +42,8 @@ const escape = (value: string) => String(value).replace(/[&<>"']/g, (c) => `&#${
 
 // ---------- the consent page ----------
 
-const KEY_ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M16 7l3 3M14 9l2 2"/></svg>';
+/** The same mark the app draws (console-ui/app.js brandMark), with its gradient defined inline. */
+const BRAND_MARK = '<svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><defs><linearGradient id="cops-grad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6d5ef8"/><stop offset=".6" stop-color="#22d3ee"/><stop offset="1" stop-color="#f471b5"/></linearGradient></defs><rect width="32" height="32" rx="9" fill="#0e1019"/><circle cx="16" cy="16" r="9.5" fill="none" stroke="url(#cops-grad)" stroke-width="3"/><path d="M11.8 16.4l2.9 2.9 5.6-6.1" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 function consentPage(d: ConsentDescription, handle: string, origin: string): string {
   const name = escape(d.clientName || 'An app');
@@ -54,11 +55,12 @@ function consentPage(d: ConsentDescription, handle: string, origin: string): str
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>Allow ${name} to use Campaign Ops</title>
+<script src="/theme.js"></script>
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
 <main class="gate gate-cloud consent">
-  <p class="gate-mark"><span class="gate-seal" aria-hidden="true">${KEY_ICON}</span>Campaign Ops</p>
+  <p class="gate-mark">${BRAND_MARK}Campaign Ops</p>
   <h1>Allow ${name} to use Campaign Ops?</h1>
   <p>${publisher} Access goes to <strong>${escape(d.redirectHost)}</strong>.</p>
   ${d.redirectIsLoopback ? '<p class="error">This sends access to an app on your computer. Continue only if you just started connecting from it.</p>' : ''}
@@ -83,7 +85,7 @@ function consentPage(d: ConsentDescription, handle: string, origin: string): str
 }
 
 function errorPage(message: string, status = 400): Response {
-  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Campaign Ops</title><link rel="stylesheet" href="/app.css"></head><body><main class="gate"><h1>That did not work</h1><p>${escape(message)}</p><p>Go back to Claude and connect again.</p></main></body></html>`;
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Campaign Ops</title><script src="/theme.js"></script><link rel="stylesheet" href="/app.css"></head><body><main class="gate"><h1>That did not work</h1><p>${escape(message)}</p><p>Go back to Claude and connect again.</p></main></body></html>`;
   return secure(new Response(html, { status, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': BASE_CSP } }));
 }
 
@@ -222,18 +224,17 @@ export default {
     return providerFor(url.origin).fetch(request, env, ctx);
   },
 
-  /** Every morning: Pulse and the witness check on every account, a phone notification for anything new. */
-  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+  /** Every hour: Autopilot's tick. Once a day, expired OAuth grants are cleaned up too. */
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     const stub = ops(env);
     ctx.waitUntil(
       (async () => {
-        for (const id of await stub.accountIds()) {
-          try {
-            await stub.watchAccount(id);
-          } catch (e) {
-            console.error('watch failed for', id, e);
-          }
+        try {
+          await stub.tick();
+        } catch (e) {
+          console.error('Autopilot tick failed', e);
         }
+        if (new Date(controller.scheduledTime).getUTCHours() !== 9) return;
         try {
           const origin = await stub.knownPublicOrigin();
           await providerFor(origin).purgeExpiredData(env);

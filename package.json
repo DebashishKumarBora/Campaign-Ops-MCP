@@ -1,7 +1,7 @@
 {
   "name": "campaign-ops-mcp",
-  "version": "0.4.0",
-  "description": "An MCP server that lets AI agents change Google Ads campaigns safely: propose, dry run, human approval, apply, verify, rollback, with Fair Housing guardrails, a tamper-evident audit log checked against Google's own change history, and Pulse alarms. Runs on your computer or on Cloudflare's free plan, where every approval is signed with a passkey.",
+  "version": "0.5.0",
+  "description": "Autopilot for Google Ads with a human in the loop: it watches every hour, writes the fix as a proposal, rings your phone, and applies only what you sign with your passkey. An MCP server with Fair Housing guardrails, dry runs, verification, rollback, a tamper-evident audit log checked against Google's own change history, and Pulse alarms. Runs on your computer or on Cloudflare's free plan.",
   "private": true,
   "type": "module",
   "license": "MIT",

@@ -1,6 +1,6 @@
 # Campaign Ops MCP
 
-**Lets AI agents change Google Ads campaigns safely.** Every change is proposed, checked, dry-run, approved by a person, applied, verified and reversible, with Fair Housing guardrails, a tamper-evident audit log, and an independent check against Google's own change history.
+**Autopilot for Google Ads, with a person in the loop.** It watches your accounts every hour, writes the fix as a proposal, rings your phone, and applies only what you sign with your passkey. Every change is checked, dry-run, approved by a person, applied, verified and reversible, with Fair Housing guardrails, a tamper-evident audit log, and an independent check against Google's own change history. Claude (or any MCP client) can use the same engine, under the same rules.
 
 **[See the live run on Google Ads](https://debashishkumarbora.github.io/agents/campaign-ops/)**: the record of its first run on a real Google Ads test account. It found an ad that broke Fair Housing rules, waited for a person to approve the fix, then changed the ad through the Google Ads API and verified it.
 
@@ -12,20 +12,31 @@ It runs on three kinds of account, side by side:
 |---|---|---|
 | Built-in sandbox | Synthetic, with problems planted on purpose | With your approval |
 | Google Ads test account | Simulated (test accounts never show ads) | With your approval, through the Google Ads API |
-| Live Google Ads account | Real spend, clicks, leads and search terms | Off until a person opens a change window, then each one with your approval |
+| Live Google Ads account | Real spend, clicks, leads and search terms | Each change signed with your passkey (in the cloud), or inside a change window a person opens (on a computer) |
 
-![The Campaign Ops approval console: account tabs with live-account locks, a budget change shown as a redline, Pulse alarms and the check against Google's own record](docs/approval-console.png)
+![Three phone screens: Home saying three changes need you, the Fair Housing fix Autopilot wrote with the free AI waiting for a passkey, and Activity listing what Autopilot noticed](docs/autopilot-phone.png)
+
+## What's new in 0.5: Autopilot
+
+- **It watches without Claude.** Every hour, on Cloudflare's free plan: Google's change history, ad disapprovals and your landing pages. Every morning, a full review: Pulse, wasted searches, Fair Housing copy, budgets, monthly pacing and the results of last week's changes.
+- **It writes the fix.** Findings become ordinary proposals signed "Autopilot", each with what it is worth and the facts behind it. They pass the same guardrails and dry run as anything Claude proposes.
+- **Approve means apply.** Your phone buzzes, you look at the change, Face ID signs it, and it is applied and verified straight away. On a live account the signature is the permission for that one change.
+- **The free AI, on a short leash.** Cloudflare Workers AI double-checks searches before they are blocked (it can only take a search off the list, never add one) and writes replacement ad copy. Copy is accepted only if it passes the Fair Housing screen, fits Google's limits and adds no number, offer or amenity the ad did not already state.
+- **It remembers and follows up.** A change you turn down is not proposed again for 30 days. A week after a change on a live account it checks the result, and proposes the undo if leads fell beyond chance. When a broken page comes back, it proposes turning the campaign back on.
+- **Calm by default.** Quiet hours hold everything but urgent alerts until morning, then send one summary. Broken tracking puts changes to that campaign on hold, because its numbers cannot be trusted.
+- **A new app for phone and desktop.** Five places: Home, Approvals, Accounts, Activity and Settings. The start screen answers one question, does anything need me, and details open on tap.
+- **Tested end to end on Cloudflare's runtime:** `npm run test:cloud` (27 steps) now includes Check now, the AI-written copy, Google's disapproval, a landing page that goes down on the hourly tick, and Autopilot's settings.
+
+To update a cloud copy: download the new version, then run `npm run cloud:deploy`. Nothing else changes: passkeys, notifications and history stay.
 
 ## What's new in 0.4: in the cloud, signed with your passkey
 
 - **Runs on Cloudflare's free plan.** `npm run cloud:setup` puts the MCP server and the approval console on your own Cloudflare account. Claude connects to it as a custom connector, from the web, desktop and phone apps.
 - **Passkeys, not passwords.** You sign in with a passkey (Face ID, Touch ID or Windows Hello). Every approval, undo, change window and resume is signed by that passkey over a hash of the exact change, and the console can check every stored signature again at any time.
 - **The AI still cannot approve.** Claude connects through OAuth 2.1 with PKCE, and allowing it takes your passkey. In the cloud there is no approval prompt inside the chat: changes are approved only in the console, signed.
-- **On your phone.** The console installs to the Home Screen and sends a notification when a change needs you, and each morning when Pulse or the witness check finds something new.
+- **On your phone.** The console installs to the Home Screen and sends a notification when a change needs you.
 - **Your history comes along.** Setup moves the proposals and the audit log from your computer to the cloud once, after checking the hash chain.
 - **Tested end to end on the real runtime:** `npm run test:cloud` runs the Worker in Cloudflare's own runtime with a virtual passkey, a fake Google Ads API and a push service that decrypts every notification.
-
-![Three phone screens: setting up a passkey with a one-time code, approving a budget change with the passkey and its fingerprint, and the record showing the signature checks out](docs/cloud-phone.png)
 
 ## What's new in 0.3
 
@@ -47,11 +58,12 @@ Once an agent can change budgets, negative keywords or ad copy, it needs the sam
 ```mermaid
 flowchart LR
   A[AI agent] -->|propose_change| B{Policy checks<br/>and dry run}
+  P[Autopilot] -->|finds a problem,<br/>writes the fix| B
   B -->|fails| X[Blocked, with reasons]
-  B -->|passes| C[Waiting for approval<br/>approve link]
-  C -->|a person approves:<br/>chat prompt or console| D[Approved]
-  C -->|a person rejects| R[Rejected]
-  D -->|apply_change| E{Re-check: kill switch,<br/>change window for live accounts,<br/>limits, cooldown, live value unchanged}
+  B -->|passes| C[Waiting for approval<br/>phone notification, approve link]
+  C -->|a person approves:<br/>passkey in the app, or the chat prompt| D[Approved]
+  C -->|a person rejects| R[Rejected, remembered 30 days]
+  D -->|applied straight away,<br/>or apply_change| E{Re-check: kill switch,<br/>live-account permission,<br/>limits, cooldown, live value unchanged}
   E -->|no| F[Refused or conflict]
   E -->|yes| G[Apply]
   G --> H{Read back<br/>and verify}
@@ -64,8 +76,8 @@ flowchart LR
 
 | Guardrail | What it does |
 |---|---|
-| No self-approval | There is no approve tool. Only a person can approve: on a computer through an approval prompt in the chat app (MCP elicitation) or the local console; in the cloud only in the console, with a passkey signature over the exact change. |
-| Live accounts stay read-only | A live account can be read and proposals can be approved, but nothing is applied until a person opens a change window in the console. Windows last 1 to 8 hours, end on their own, and can be locked early. The backend itself refuses live writes without one. |
+| No self-approval | There is no approve tool. Only a person can approve: on a computer through an approval prompt in the chat app (MCP elicitation) or the local console; in the cloud only in the app, with a passkey signature over the exact change. Autopilot proposes through the same path and cannot approve either. |
+| Live accounts stay read-only | A live account can be read and proposals can be approved, but a change is applied only with a person's permission: a passkey signature over that exact change (in the cloud), or a change window opened in the console. Windows last 1 to 8 hours, end on their own, and can be locked early. The backend itself refuses live writes without one of the two. |
 | Scopes | `read`, `propose` or `execute`. Tools outside the scope are not even listed to the AI. |
 | Budget limits | Step limits per change (+30% / -50% by default), a per-campaign range, and an account-wide daily cap. |
 | Fair Housing screening | Ad copy that states a preference or limitation (for example "adults only" or "perfect for couples") is blocked. Coded or age-signaling language is flagged for review. Re-enabling a flagged ad is blocked too. |
@@ -98,6 +110,48 @@ flowchart LR
 
 Neither one changes anything. They say what to check, and any fix still goes through a proposal and approval.
 
+## Autopilot
+
+Autopilot is the part that works while nobody is looking. It reads the account, decides what is wrong, writes each fix as a proposal and tells your phone. It never approves: a fix sits in Approvals until you sign it, then it is applied and verified at once.
+
+**When it runs**
+
+| | What happens |
+|---|---|
+| Every hour | Google's change history (edits made outside Campaign Ops, and any robot change nobody approved), ads Google disapproved or limited, and every landing page your ads send people to. It also applies anything you approved that had to wait, for example for a cooldown, and sends the summary held during quiet hours. |
+| Every morning (7:00 in your time zone by default) | The full review: Pulse, the health check, Fair Housing screening, wasted searches, budgets, monthly pacing, fuller ads and the results of past changes. Then one notification for whatever needs you. |
+| When you tap Check now | The full review, right away. Claude can ask for one too, with `request_autopilot_check`. |
+
+**What it does, skill by skill.** Each one can be turned off in Settings.
+
+| Skill | What it does | It can propose |
+|---|---|---|
+| Lead tracking | Spots when leads stop being recorded while clicks keep coming, and holds changes on that campaign | Nothing: it tells you what to check |
+| Stalled campaigns | A running campaign that suddenly spends nothing | Nothing |
+| Spend spikes | A day far above the usual spend | Nothing |
+| Lead drops | Leads per click well below normal, with the odds it is luck | Nothing |
+| Outside changes | Edits made in Google Ads by people or other tools, and robot changes nobody approved | Nothing: an urgent alarm |
+| Ad approvals | Ads Google disapproved or limited, with Google's reason | Nothing |
+| Landing pages | A page that fails two checks in a row (an error or no answer, not a page that refuses robots) | Pausing the campaign or ads that send people there, and turning them back on when the page works |
+| Fair Housing copy | Ad copy that states a preference about who should live there | Pausing the ad at once, replacement copy, then turning the ad back on |
+| Wasted searches | Searches that cost money and never brought a lead, double-checked by the AI | Negative keywords. Searches tied to a protected group are never blocked |
+| Spend without leads | A campaign that spends for weeks without a lead | Pausing it |
+| Budget for winners | A campaign with cheap leads that runs out of budget | A budget raise within your step limit |
+| Monthly pacing | Spend heading over a monthly target you set | Trimming the least efficient budgets first |
+| Fuller ads | Ads with few headlines or descriptions | New lines, written by the AI only from what the ad already says |
+| Results check | Each change a week later, on accounts with real numbers | The undo, if leads fell beyond chance |
+
+**What it will not do**
+
+- Approve anything, or apply anything you did not sign.
+- Propose more than six changes per review (you can choose 1 to 10). Urgent fixes, such as pausing risky copy or a campaign pointing at a broken page, always go through.
+- Ask again for something you turned down (30 days), something a guardrail stopped (7 days) or something that expired unanswered (3 days).
+- Change a campaign whose lead tracking is broken, except for Fair Housing fixes and broken pages.
+- Let the AI's words through unchecked. A search the AI was not sure about stays unblocked. A line of copy is refused if it fails the Fair Housing screen, mentions a protected group, adds a number, price, offer or amenity the ad did not state, repeats a line, or breaks Google's limits.
+- Watch the sandbox once a real account is connected: its numbers are the same simulation, so it would only repeat itself. You can turn any account on or off in its page.
+
+**Where it runs.** In the cloud, a Cron Trigger fires every hour and the Durable Object works through Autopilot's jobs one at a time on its alarm, so every step is a short request inside the free plan. The free AI (Workers AI: Gemma 4 26B, with Llama 3.3 70B as a fallback) makes at most 40 calls a day, a small part of the free plan's 10,000 daily Neurons. On a computer, Autopilot runs every hour while the console is open, uses rules only (no AI), and `CAMPAIGN_OPS_AUTOPILOT=off` turns the timer off.
+
 ## Quick start
 
 Requires [Node.js](https://nodejs.org) 22 or newer (any current LTS) and Git.
@@ -106,9 +160,9 @@ Requires [Node.js](https://nodejs.org) 22 or newer (any current LTS) and Git.
 git clone https://github.com/debashishkumarbora/campaign-ops-mcp.git
 cd campaign-ops-mcp
 npm install
-npm test        # 98 tests: guardrails, live accounts, Pulse, witness, passkeys, push, console security, MCP over stdio, Google Ads API
+npm test        # 115 tests: guardrails, Autopilot, live accounts, Pulse, witness, passkeys, push, console security, MCP over stdio, Google Ads API
 npm run demo    # a narrated run through every guardrail
-npm run test:cloud   # optional: the cloud version end to end, 24 steps (needs Playwright with Chromium)
+npm run test:cloud   # optional: the cloud version end to end, 27 steps (needs Playwright with Chromium)
 ```
 
 Everything runs against a sandbox account with synthetic data. No Google account is needed yet.
@@ -128,13 +182,16 @@ This opens [MCP Inspector](https://github.com/modelcontextprotocol/inspector) in
 npm run console
 ```
 
-This opens the console in your browser with your key, and the browser remembers it. Proposals appear within a few seconds of the agent making them, and the approve link from the chat opens the exact one.
+This opens the console in your browser with your key, and the browser remembers it. Proposals appear within a few seconds of the agent making them, and the approve link from the chat opens the exact one. The same app runs in the cloud, signed in with a passkey.
 
-- **Account tabs** show each account's kind, whether its numbers are real, Pulse alarms, and whether it matches Google's record. Live accounts show their lock, with **Open change window** and **Lock now**.
-- **Waiting for you** shows each proposal as a redline: the old value struck through, the new value in signature ink, every check, and what approving lets the AI do.
-- **Watching** shows Pulse alarms with a chart of the days behind them, and the ledger: Campaign Ops approvals above, Google's record below, each matched pair joined.
-- **Decisions, guardrail stops and the audit log** keep the full history, with one-click undo.
-- On a phone it becomes an app with three tabs: Approve, Watch and Record.
+![The app on a computer: Home with three changes waiting, and the Fair Housing fix open beside it with the old and new lines, the reason, what Autopilot saw, and Approve with passkey](docs/approval-console.png)
+
+- **Home** answers one question: does anything need me? It shows what is waiting, about how much it saves, and what Autopilot noticed lately. **Check now** runs a review.
+- **Approvals** opens each change on tap: what changes (old value struck through, new value beside it), why, the facts Autopilot saw, every check, and one button that approves and applies it. Decided and stopped proposals are one tap away, with undo.
+- **Accounts** shows each account's kind and health. Its page has Pulse alarms with a chart of the days behind them, the ledger against Google's record, the change window for live accounts, and Autopilot's switch and monthly target for that account.
+- **Activity** lists everything Autopilot noticed and every decision by day, with the hash-chained audit log and, in the cloud, a check of every passkey signature.
+- **Settings** has Autopilot (on or off, review time, time zone, quiet hours, skills, changes per review), notifications, passkeys, Pause all changes, and light or dark.
+- On a phone it is an app with a tab bar; on a computer the same five places sit in a sidebar and a change opens beside the list.
 
 The console listens on `127.0.0.1` only, requires a key the AI never sees, checks the Host header (DNS rebinding), refuses cross-site requests, escapes everything the AI writes, and runs under a strict Content Security Policy. Pulse and witness results are reused for five minutes, so the console never burns through the API's daily limits.
 
@@ -187,7 +244,7 @@ It signs you in to Cloudflare (a browser window opens the first time), uploads C
 | `npm run cloud:code` | A new one-hour setup code, to add a passkey on a device when no signed-in device is at hand |
 | `npm run cloud:unlink-desktop` | Removes the local Campaign Ops entry from Claude Desktop, after saving a copy of its settings |
 
-To add a computer, sign in on it with your phone (choose the option to use a phone and scan the code), then add its own passkey under Record. Or use `npm run cloud:code`. Passkeys belong to the address they were made on: if you later move Campaign Ops to your own domain, make passkeys there with a setup code.
+To add a computer, sign in on it with your phone (choose the option to use a phone and scan the code), then add its own passkey in Settings. Or use `npm run cloud:code`. Passkeys belong to the address they were made on: if you later move Campaign Ops to your own domain, make passkeys there with a setup code.
 
 **What runs where**
 
@@ -195,12 +252,13 @@ To add a computer, sign in on it with your phone (choose the option to use a pho
 |---|---|
 | MCP server for Claude | A Worker at `/mcp`, behind OAuth 2.1 ([workers-oauth-provider](https://github.com/cloudflare/workers-oauth-provider)) |
 | Approval console | Static files served by the same Worker, with a strict Content Security Policy |
-| Proposals, audit log, passkeys, sandbox | One Durable Object with its own SQLite database. The unchanged engine runs inside it: `node:fs` is swapped for a small file layer on SQLite |
+| Proposals, audit log, passkeys, sandbox, Autopilot's memory | One Durable Object with its own SQLite database. The unchanged engine runs inside it: `node:fs` is swapped for a small file layer on SQLite |
 | Connector grants and tokens | Workers KV, tokens stored only as hashes |
-| Morning watch | A cron trigger at 13:07 UTC runs Pulse and the witness check on every account |
+| Autopilot | A Cron Trigger every hour (at minute 17) queues its jobs; the Durable Object runs them one by one on its alarm |
+| The free AI | Workers AI, through a binding: nothing to sign up for and no API key |
 | Robot key, session and notification keys | Encrypted Worker secrets. None is written into the project folder |
 
-**Free plan.** Cloudflare's free plan gives each request 10 ms of CPU, with some flexibility for the occasional longer one. Campaign Ops requests take a few milliseconds once warm, and the console polls only while it is on screen. If you ever see "Worker exceeded resource limits", the Workers Paid plan lifts it.
+**Free plan.** Cloudflare's free plan gives each request 10 ms of CPU, with some flexibility for the occasional longer one. Campaign Ops requests take a few milliseconds once warm, Autopilot splits its work into small steps, and the app asks for fresh data only while it is on screen. Workers AI includes 10,000 Neurons a day; Autopilot stops at 40 AI calls a day and falls back to its rules. If you ever see "Worker exceeded resource limits", the Workers Paid plan lifts it.
 
 ## Connect a Google Ads test account
 
@@ -243,7 +301,7 @@ npm run gads:add -- --remove 123-456-7890     # disconnect it
 |---|---|
 | Spend, clicks, leads, search terms | Real, from Google |
 | Pulse and the witness check | On real numbers and Google's real change history |
-| Changes | Off until a person opens a change window in the console, typing the account name. Every change still needs its own approval |
+| Changes | Each one needs a person's permission: in the cloud, the passkey signature on that change; on a computer, a change window opened in the console by typing the account name. Every change still needs its own approval |
 | Dry run | Google's own `validateOnly`, always allowed because it changes nothing |
 
 ## Tools
@@ -261,6 +319,8 @@ npm run gads:add -- --remove 123-456-7890     # disconnect it
 | `get_policy` | The guardrails in force, change windows and the kill switch state | read |
 | `list_proposals` / `get_proposal` | Proposal status, every check, the approve link, and the next step | read |
 | `get_audit_log` | Recent audit entries and chain integrity | read |
+| `get_autopilot_report` | What Autopilot found lately, what is waiting for approval, and its settings | read |
+| `request_autopilot_check` | Asks Autopilot for a full review now. Anything it wants to change still becomes a proposal | propose |
 | `propose_change` | The only way to request a change: budgets, campaign status, negative keywords, ad copy, or one ad's status. Runs every check and the dry run, and returns an approve link | propose |
 | `request_rollback` | Creates an undo proposal for an applied change | propose |
 | `apply_change` | Applies an approved change, re-checking everything first, then verifies | execute |
@@ -282,6 +342,7 @@ Copy `.env.example` to `.env` to change settings, and edit `policy.json` to chan
 | `CAMPAIGN_OPS_GOOGLE_ADS` | on when set up | `off` hides the Google Ads accounts |
 | `CAMPAIGN_OPS_SECRETS_DIR` | `~/campaign-ops-secrets` | Where the robot key and Google Ads connection settings live |
 | `GOOGLE_ADS_API_VERSION` | `v26` | Google Ads API version |
+| `CAMPAIGN_OPS_AUTOPILOT` | on | `off` stops Autopilot's hourly check while the local console runs (Check now still works) |
 
 `npm run reset` rebuilds the sandbox. When a Google Ads account is connected it keeps proposals and the audit log, because they are the record of real changes the witness check matches with Google. `npm run reset -- --all` clears them too.
 
@@ -307,6 +368,13 @@ Copy `.env.example` to `.env` to change settings, and edit `policy.json` to chan
 - Notifications as a side door: they go only to the browsers' own push services, encrypted end to end (RFC 8291) and signed (RFC 8292).
 - Strangers using up the free quota: opening the connect page and registering an app have a daily budget, and stored sign-in challenges are capped.
 
+**With Autopilot, also**
+
+- Autopilot approving its own work: it calls the same `propose` path as any agent. Approving, and the permission for a live account, still need a person.
+- The AI going wrong: it can only remove searches from a list Autopilot built by rule, and every line of copy it writes is checked by code (Fair Housing, protected groups, no new numbers, prices, offers or amenities, Google's limits) before a person sees it.
+- Alarm fatigue: alerts are sent once, not every hour; quiet hours hold all but urgent news; and anything you turn down stays down for 30 days.
+- A runaway day: at most a set number of proposals per review, at most 12 open at once, and the same rate limits, cooldowns and kill switch as everything else.
+
 **Out of scope**
 
 - A compromised computer, a compromised Cloudflare account, or an MCP client that fakes the approval prompt.
@@ -326,7 +394,7 @@ Section 804(c) of the Fair Housing Act prohibits housing ads that state a prefer
 - [x] **Milestone 3:** Google Ads test-account backend (real API calls, no ads served, no spend). Live run done: Claude found a Fair Housing problem in a real Google Ads test account, a person approved the fix, and the agent rewrote the ad through the Google Ads API
 - [x] **Real-account mode (0.3):** live accounts read-only until a person opens a change window, Pulse alarms, the witness check against Google's change history, approve links, single-ad pause, and a phone-ready console
 - [x] **Milestone 4 (0.4):** a remote MCP server and the approval console on Cloudflare Workers, with passkey-signed approvals, OAuth for Claude, phone notifications and a morning watch
-- [ ] **Milestone 5:** daily autopilot that runs diagnostics and Pulse, and queues proposals for approval
+- [x] **Milestone 5 (0.5):** Autopilot: hourly watch and a daily review with 14 skills, fixes written as proposals with the free AI, approve-means-apply, results checks with undo proposals, and a redesigned app
 - [ ] **Milestone 6:** evaluation suite that scores agent runs for safe behavior
 
 ## Project structure
@@ -348,23 +416,30 @@ src/
     sandbox.ts, seed.ts Synthetic account with planted problems and its own change history
     router.ts           Sandbox and Google Ads accounts side by side
     googleAds/          Google Ads API: robot login, REST client, backend, sample campaigns
+  autopilot/
+    autopilot.ts        The jobs: hourly watch, the daily review in small steps, approve-means-apply, notifications
+    skills.ts           What each fix skill proposes, and what Autopilot remembers
+    ai.ts               The free AI's three jobs, and the code that checks everything it writes
+    landing.ts          Landing page checks
+    outcomes.ts         The results check a week after a change
+    settings.ts, store.ts  Settings, quiet hours, and Autopilot's memory
   console/api.ts        The console's API, shared by the local server and the cloud
   console/server.ts     Approval console HTTP server (local)
   cloud/                Passkeys (WebAuthn), signed sessions, web push, and the file layer on SQLite
   util/time.ts          Account time zones (Google reports dates and change times in them)
 cloud/
   src/worker.ts         The Worker: OAuth for the MCP endpoint, the passkey consent page, security headers, cron
-  src/ops.ts            The Durable Object: engine, console API, passkeys, notifications, history import
+  src/ops.ts            The Durable Object: engine, console API, passkeys, notifications, history import, Autopilot's job queue
   wrangler.base.jsonc   Cloudflare settings (npm run cloud:setup makes wrangler.jsonc from it)
-console-ui/             Console page (plain HTML, CSS, JS), its typeface, app manifest, icons and service worker
+console-ui/             The app (plain HTML, CSS, JS), its typeface, app manifest, icons and service worker
 web/                    Browser build: entry, Node shims, and the static demo site
 scripts/                demo, console, reset, gads:*, cloud:*, test runner
 test/                   node:test suites, with a fake Google Ads API
-test/e2e/               The cloud end-to-end check (wrangler dev, Playwright, a virtual passkey)
+test/e2e/               The cloud end-to-end check (wrangler dev, Playwright, a virtual passkey, an AI stand-in)
 ```
 
 ## License
 
 MIT. Built by [Debashish Kumar Bora](https://debashishkumarbora.github.io).
 
-The console's typeface is Source Serif 4 by Adobe, used under the SIL Open Font License 1.1 (`console-ui/fonts/LICENSE-source-serif-4.txt`).
+The app's typeface is Plus Jakarta Sans by Tokotype, used under the SIL Open Font License 1.1 (`console-ui/fonts/LICENSE-plus-jakarta-sans.txt`).

@@ -2,7 +2,17 @@ node_modules/
 dist/
 data/
 .env
+# Google Ads robot key: it lives outside the project, but never commit one by accident
+google-ads-key*.json
+campaign-ops-secrets/
 *.log
 *.tmp
 .DS_Store
 Thumbs.db
+# Cloudflare: the generated config holds account-specific IDs; .dev.vars holds local test secrets
+cloud/wrangler.jsonc
+cloud/wrangler.dev.jsonc
+cloud/.wrangler/
+cloud/.dev.vars
+cloud/.deployed.json
+cloud/wrangler.e2e*.jsonc

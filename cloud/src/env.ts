@@ -5,6 +5,8 @@ export interface Env {
   OPS: DurableObjectNamespace<CampaignOps>;
   OAUTH_KV: KVNamespace;
   ASSETS: Fetcher;
+  /** Workers AI, included in the free plan: Autopilot's second opinion on searches and its copywriter. */
+  AI?: Ai;
   /** Signs console session cookies (HMAC). Secret. */
   SESSION_SECRET: string;
   /** One-time setup code for the first passkey: JSON {hash, expiresAt, epoch}. Secret. */
@@ -20,4 +22,6 @@ export interface Env {
   /** Tests only: a fake Google Ads API and plain-http push endpoints on this computer. */
   GOOGLE_ADS_API_BASE_URL?: string;
   ALLOW_INSECURE_TEST_ENDPOINTS?: string;
+  /** Tests only: a Workers AI stand-in on this computer. */
+  AI_TEST_URL?: string;
 }

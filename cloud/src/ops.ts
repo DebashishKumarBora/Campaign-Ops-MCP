@@ -13,8 +13,10 @@ import { Engine } from '../../src/governance/engine.js';
 import { parsePolicy, type AppConfig } from '../../src/config.js';
 import { createMcpServer } from '../../src/server.js';
 import { ConsoleApi, classifyConsoleRequest } from '../../src/console/api.js';
-import { checkPulse } from '../../src/governance/pulse.js';
 import { AuditLog } from '../../src/governance/audit.js';
+import { Autopilot } from '../../src/autopilot/autopilot.js';
+import { httpAiRunner, workersAiBrain, type AiRunner } from '../../src/autopilot/ai.js';
+import type { Job, Notice } from '../../src/autopilot/types.js';
 import { UserError, type Proposal } from '../../src/types.js';
 import { safeEqual } from '../../src/util/hash.js';
 import { assertionOptions, bindChallenge, PasskeyError, registrationOptions, verifyAssertion, verifyRegistration, type AssertionResponseJSON, type RegistrationResponseJSON, type StoredCredential } from '../../src/cloud/webauthn.js';
@@ -44,6 +46,10 @@ const BODY_MAX_CHARS = 64_000;
 const IMPORT_MAX_CHARS = 20_000_000;
 /** Daily limits for the two OAuth steps anyone can start (see allowOAuthWrite). */
 const OAUTH_DAILY = { authorize: 60, register: 20 } as const;
+/** Autopilot jobs waiting at most; a stuck queue can never grow without end. */
+const QUEUE_MAX = 80;
+/** When an approved change could not be applied yet (a cooldown), Autopilot tries again after this. */
+const RETRY_APPLY_MS = 31 * 60_000;
 
 interface Challenge {
   purpose: string;
@@ -59,9 +65,10 @@ interface Subscription extends PushSubscriptionJSON {
   createdAt: string;
 }
 
-interface WatchState {
-  /** Alarms already sent, so a phone is not told the same thing every morning. */
-  sent: Record<string, string>;
+/** One Autopilot job waiting for its turn, run by the Durable Object's alarm. */
+interface QueuedJob {
+  job: Job;
+  at: number;
 }
 
 interface Built {
@@ -69,6 +76,7 @@ interface Built {
   backend: AdsBackend;
   api: ConsoleApi;
   config: AppConfig;
+  autopilot: Autopilot;
   googleNote?: string;
 }
 
@@ -160,10 +168,23 @@ export class CampaignOps extends DurableObject<Env> {
     const backend = new RouterBackend(parts);
     const engine = new Engine({ backend, dataDir: DATA, policy, scope: 'execute' });
     const version = String((pkg as { version?: string }).version ?? '0.0.0');
+    const testing = this.env.ALLOW_INSECURE_TEST_ENDPOINTS === '1';
+    const runner: AiRunner | undefined = this.env.AI ? (this.env.AI as unknown as AiRunner) : testing && this.env.AI_TEST_URL ? httpAiRunner(this.env.AI_TEST_URL) : undefined;
+    const autopilot = new Autopilot({
+      engine,
+      backend,
+      dataDir: DATA,
+      brain: runner ? workersAiBrain(runner) : undefined,
+      notify: (notices) => this.notifyAll(notices),
+      // Tests serve landing pages on this computer; the real thing never opens private addresses.
+      pageFilter: testing ? (u) => (/(^|\.)example\.(com|org|net)$/.test(new URL(u).hostname) ? 'an example address' : undefined) : undefined,
+    });
     const api = new ConsoleApi({
       engine,
       backend,
       version,
+      autopilot,
+      runAutopilot: (jobs) => this.enqueue(jobs),
       extraState: () => ({
         cloud: {
           owner: this.ownerName(),
@@ -174,7 +195,7 @@ export class CampaignOps extends DurableObject<Env> {
       }),
     });
     const config: AppConfig = { root: '/', dataDir: DATA, scope: 'execute', consolePort: 0, consoleToken: '', forceKillSwitch: false, policy, policySource: 'policy.json (cloud)' };
-    this.built = { engine, backend, api, config, googleNote };
+    this.built = { engine, backend, api, config, autopilot, googleNote };
     return this.built;
   }
 
@@ -460,6 +481,10 @@ export class CampaignOps extends DurableObject<Env> {
     }
     const result = await api.handle({ method: request.method, pathname: path, query: url.searchParams, body, who, approval });
     if (!result) return json(404, { error: 'Not found.' });
+    // Approved but held back (a cooldown or the hourly limit): Autopilot applies it as soon as it can.
+    const outcome = (result.body as { outcome?: { status?: string } }).outcome;
+    if (action.kind === 'approve' && outcome?.status === 'refused') await this.enqueue([{ kind: 'apply_approved' }], RETRY_APPLY_MS);
+    if (action.kind === 'resume_all') await this.enqueue([{ kind: 'apply_approved' }]);
     return json(result.status, result.body);
   }
 
@@ -580,6 +605,10 @@ export class CampaignOps extends DurableObject<Env> {
     return { sent, failed };
   }
 
+  private async notifyAll(notices: Notice[]): Promise<void> {
+    for (const n of notices) await this.notify({ title: n.title, body: n.body, url: n.url, tag: n.tag, urgent: n.urgent });
+  }
+
   private waitingMessage(p: Proposal): PushMessage {
     const prefix = p.risk === 'high' ? 'High risk: ' : '';
     return { title: `${prefix}${p.typeLabel} needs you`, body: `${p.id}: ${p.summary}`.slice(0, 180), url: `/#p=${p.id}`, tag: p.id };
@@ -588,7 +617,7 @@ export class CampaignOps extends DurableObject<Env> {
   // ---------- MCP ----------
 
   private async mcp(request: Request, origin: string): Promise<Response> {
-    const { engine, backend, config } = this.build();
+    const { engine, backend, config, autopilot } = this.build();
     const server = createMcpServer({
       engine,
       backend,
@@ -597,6 +626,8 @@ export class CampaignOps extends DurableObject<Env> {
       consoleUrl: () => `${origin}/`,
       agentName: () => 'AI agent (cloud connector)',
       passkeyOnly: true,
+      autopilot,
+      runAutopilot: (jobs) => this.enqueue(jobs),
       onWaiting: (p) => {
         this.ctx.waitUntil(this.notify(this.waitingMessage(p), origin).catch(() => undefined));
       },
@@ -610,51 +641,62 @@ export class CampaignOps extends DurableObject<Env> {
     }
   }
 
-  // ---------- daily watch (called by the Worker's cron) ----------
+  // ---------- Autopilot: the hourly tick and the job queue ----------
 
-  async accountIds(): Promise<string[]> {
-    return (await this.build().backend.listAccounts()).map((a) => a.id);
+  /**
+   * Called by the Worker's cron every hour. Autopilot decides what is due
+   * (the hourly watch, the daily review at its hour) and the jobs run one by
+   * one on this object's alarm, each in its own short request.
+   */
+  async tick(): Promise<{ queued: number }> {
+    const jobs = await this.build().autopilot.plan();
+    await this.enqueue(jobs);
+    return { queued: jobs.length };
   }
 
-  /** Runs Pulse and the witness check for one account and tells the phone about anything new. */
-  async watchAccount(accountId: string): Promise<{ alarms: number; notified: number }> {
-    const { engine, backend } = this.build();
-    const account = await backend.getAccount(accountId);
-    if (!account) return { alarms: 0, notified: 0 };
-    const state = this.get<WatchState>('watch', { sent: {} });
-    const now = Date.now();
-    for (const [k, at] of Object.entries(state.sent)) if (now - Date.parse(at) > 14 * 86_400_000) delete state.sent[k];
-    const messages: PushMessage[] = [];
-    let alarms = 0;
-    try {
-      const pulse = await checkPulse(backend, accountId, { days: 28 });
-      for (const a of pulse.alarms) {
-        alarms++;
-        const key = `pulse:${accountId}:${a.kind}:${a.campaignId}:${a.evidence.dates[a.evidence.highlightFrom] ?? ''}`;
-        if (state.sent[key]) continue;
-        state.sent[key] = new Date(now).toISOString();
-        messages.push({ title: `Pulse: ${account.name}`, body: a.title.slice(0, 180), url: `/#a=${encodeURIComponent(accountId)}`, tag: `pulse-${a.kind}` });
-      }
-    } catch {
-      // Pulse problems show in the console; the watch keeps going
+  private async enqueue(jobs: Job[], delayMs = 0): Promise<void> {
+    const at = Date.now() + delayMs;
+    const queue = this.get<QueuedJob[]>('autopilotQueue', []);
+    for (const job of jobs) {
+      const key = JSON.stringify(job);
+      if (queue.some((q) => JSON.stringify(q.job) === key && Math.abs(q.at - at) < 60_000)) continue;
+      queue.push({ job, at });
     }
-    try {
-      const w = await engine.witness(accountId, 14);
-      if (w.verdict === 'alarm') {
-        alarms++;
-        const key = `witness:${accountId}:${w.unexplained.map((e) => `${e.resourceName}@${e.at}`).join('|')}`;
-        if (!state.sent[key]) {
-          state.sent[key] = new Date(now).toISOString();
-          messages.push({ title: `Unapproved change in ${account.name}`, body: w.headline.slice(0, 180), url: `/#a=${encodeURIComponent(accountId)}`, tag: 'witness' });
-        }
-      }
-    } catch {
-      // as above
+    const kept = queue.slice(-QUEUE_MAX);
+    this.put('autopilotQueue', kept);
+    await this.armAlarm(kept);
+  }
+
+  private async armAlarm(queue: QueuedJob[]): Promise<void> {
+    if (!queue.length) return;
+    const next = Math.max(Date.now() + 200, Math.min(...queue.map((q) => q.at)));
+    const current = await this.ctx.storage.getAlarm();
+    if (current === null || current > next) await this.ctx.storage.setAlarm(next);
+  }
+
+  /** Runs the next due job, then sets the alarm for the one after. */
+  async alarm(): Promise<void> {
+    const { autopilot } = this.build();
+    const queue = this.get<QueuedJob[]>('autopilotQueue', []).sort((a, b) => a.at - b.at);
+    const due = queue.findIndex((q) => q.at <= Date.now() + 50);
+    if (due < 0) {
+      await this.armAlarm(queue);
+      return;
     }
-    this.put('watch', state);
-    let notified = 0;
-    for (const m of messages) notified += (await this.notify(m)).sent;
-    return { alarms, notified };
+    const [item] = queue.splice(due, 1);
+    // Saved before running, so a job that crashes the request is not repeated forever.
+    this.put('autopilotQueue', queue);
+    let more: Job[] = [];
+    try {
+      more = await autopilot.run(item.job);
+    } catch (e) {
+      console.error('autopilot job failed', item.job.kind, e);
+    }
+    const after = this.get<QueuedJob[]>('autopilotQueue', []);
+    after.unshift(...more.map((job) => ({ job, at: Date.now() })));
+    const kept = after.slice(0, QUEUE_MAX);
+    this.put('autopilotQueue', kept);
+    await this.armAlarm(kept);
   }
 
   async knownPublicOrigin(): Promise<string> {

@@ -16,7 +16,9 @@
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CampaignOps"] }],
   // Stores OAuth grants for the Claude connector (tokens are kept only as hashes).
   "kv_namespaces": [{ "binding": "OAUTH_KV" }],
-  // The daily watch: 13:07 UTC is 7:07 in the morning in Chicago (8:07 in summer).
-  "triggers": { "crons": ["7 13 * * *"] },
+  // Workers AI (free plan: 10,000 units a day; Autopilot uses a small part of it).
+  "ai": { "binding": "AI" },
+  // Autopilot's hourly check. It decides itself when the daily review is due (7:00 in your time zone by default).
+  "triggers": { "crons": ["17 * * * *"] },
   "observability": { "enabled": true }
 }
