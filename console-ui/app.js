@@ -23,6 +23,8 @@
   const modalEl = document.getElementById('modal');
   const toastsEl = document.getElementById('toasts');
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  /** The public demo (web/app) runs this same app on a made-up account, entirely in the browser. */
+  const DEMO = Boolean(window.CAMPAIGN_OPS_DEMO);
 
   const S = {
     key: null,
@@ -348,7 +350,7 @@
 
   function frameHtml(d, body) {
     const items = navItems(d);
-    const sub = S.cloud && d.cloud ? `Signed in as ${d.cloud.owner}` : `Version ${d.app.version}`;
+    const sub = DEMO ? 'Live demo' : S.cloud && d.cloud ? `Signed in as ${d.cloud.owner}` : `Version ${d.app.version}`;
     const side = `<aside class="side" aria-label="Sections">
       <button class="brand" data-act="nav" data-id="home">${brandMark()}<div><b>Campaign Ops</b><span>${esc(sub)}</span></div></button>
       ${items.map((t) => `<button class="side-tab" data-act="nav" data-id="${t.id}"${S.view === t.id ? ' aria-current="page"' : ''}>${t.icon}<span>${t.label}</span>${t.badge ? `<span class="badge">${esc(t.badge)}</span>` : ''}${t.pip ? '<span class="pip" aria-label="Something needs a look"></span>' : ''}</button>`).join('')}
@@ -1145,7 +1147,14 @@
     notes.push('Fair Housing checks are a screening aid, not legal advice.');
     if (d.cloud && d.cloud.googleNote) notes.push(d.cloud.googleNote);
     const themeBtn = (id, label) => `<button data-act="theme" data-id="${id}" aria-pressed="${theme === id}">${label}</button>`;
-    return `${pausedBanner(d)}<div class="view-head"><h1>Settings</h1><p>${S.cloud && d.cloud ? `Signed in as ${esc(d.cloud.owner)}.` : 'On this computer.'}</p></div>
+    const where = DEMO ? 'A live demo on a made-up account. It runs in this browser and starts fresh when you reload.' : S.cloud && d.cloud ? `Signed in as ${esc(d.cloud.owner)}.` : 'On this computer.';
+    if (DEMO) notes.push('In this demo the AI’s words are written in advance; in the cloud, Cloudflare’s free AI writes them. Everything else is the real engine.');
+    const leave = DEMO
+      ? '<button class="btn btn-small" data-act="demo-reset">Start the demo again</button><a class="btn btn-small" href="https://debashishkumarbora.github.io/" target="_blank" rel="noopener">Made by Debashish Kumar Bora</a>'
+      : S.cloud
+        ? `<button class="btn btn-small" data-act="signout"${S.settingsBusy ? ' disabled' : ''}>Sign out</button>`
+        : '<button class="btn btn-small" data-act="forget-key">Forget the console key here</button>';
+    return `${pausedBanner(d)}<div class="view-head"><h1>Settings</h1><p>${where}</p></div>
       ${autopilotSettings()}
       ${notificationsSettings(d)}
       ${passkeySettings(d)}
@@ -1154,7 +1163,7 @@
       </div></section>
       <section class="sec"><div class="sec-head"><h2>Appearance</h2></div><div class="seg themes" role="group" aria-label="Theme">${themeBtn('system', 'Match device')}${themeBtn('light', 'Light')}${themeBtn('dark', 'Dark')}</div></section>
       <section class="sec"><div class="sec-head"><h2>About</h2></div><p class="fine">${esc(notes.join(' '))}</p>
-        <div class="btns">${S.cloud ? `<button class="btn btn-small" data-act="signout"${S.settingsBusy ? ' disabled' : ''}>Sign out</button>` : '<button class="btn btn-small" data-act="forget-key">Forget the console key here</button>'}</div></section>`;
+        <div class="btns">${leave}</div></section>`;
   }
 
   // ---------- render ----------
@@ -1487,6 +1496,9 @@
         store(KEY_NAME, null);
         S.key = null;
         renderGate('');
+        return;
+      case 'demo-reset':
+        location.reload();
         return;
       case 'ap-check':
         checkNow();
@@ -2163,6 +2175,11 @@
   /** Asks the server which sign-in it uses, then starts. */
   async function boot() {
     S.pendingSheet = readHash();
+    if (DEMO) {
+      S.key = 'demo';
+      refresh(true);
+      return;
+    }
     try {
       const res = await fetch('/mode', { cache: 'no-store' });
       const m = res.ok ? await res.json() : {};

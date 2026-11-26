@@ -4,7 +4,7 @@
 
 **[See the live run on Google Ads](https://debashishkumarbora.github.io/agents/campaign-ops/)**: the record of its first run on a real Google Ads test account. It found an ad that broke Fair Housing rules, waited for a person to approve the fix, then changed the ad through the Google Ads API and verified it.
 
-**[Try the live demo](https://debashishkumarbora.github.io/campaign-ops/)**: the real engine, compiled to run in your browser on a fictional sandbox account. Approve the agent's fixes, then try to make it misbehave.
+**[Try the live demo](https://debashishkumarbora.github.io/campaign-ops/)**: the real app, engine and Autopilot, running in your browser on a made-up account. Autopilot has already found the problems and written the fixes. Approve one and watch it get applied, checked and logged.
 
 It runs on three kinds of account, side by side:
 
@@ -197,13 +197,15 @@ The console listens on `127.0.0.1` only, requires a key the AI never sees, check
 
 ## The browser demo
 
-The live demo runs the same engine, sandbox, diagnostics and Fair Housing code as the MCP server. `scripts/build-web.mjs` bundles them with esbuild and swaps only Node's file system, path and hashing modules for small in-memory versions (`web/shims`), so every guardrail behaves exactly as it does in Node. SHA-256 output matches Node byte for byte.
+The live demo is the real app (`console-ui`) on the same engine, sandbox, Autopilot and console API as the cloud version. `scripts/build-web.mjs` bundles them with esbuild and swaps only Node's file system, path and hashing modules for small in-memory versions (`web/shims`), so every guardrail behaves exactly as it does in Node. SHA-256 output matches Node byte for byte.
+
+Three things differ from the real thing, and the demo says so: the page's requests to `/api/...` are answered inside the browser, notifications appear inside the page instead of on a phone, and the AI's words are written in advance (in the cloud, Workers AI writes them). A reload starts fresh.
 
 ```bash
-npm run build:web   # writes web/site/engine.js
+npm run build:web   # writes web/app (the app demo) and web/site/engine.js
 ```
 
-`web/site` is a static site (HTML, CSS, JS). Host it anywhere, for example GitHub Pages. Add `?embed=app` to the address for a compact app view with only the workspace and a Replay tab, which is how the portfolio's phone app shows it.
+`web/app` is a static site. Host it anywhere, for example GitHub Pages. Inside an iframe it keeps its steps out of the page's back history, and `window.DKB_DEMO.closeTop()` closes its own panels first, which is how the portfolio's phone app shows it. `web/site` is the earlier guided demo page, kept for reference.
 
 ## Connect an AI client
 
@@ -432,7 +434,7 @@ cloud/
   src/ops.ts            The Durable Object: engine, console API, passkeys, notifications, history import, Autopilot's job queue
   wrangler.base.jsonc   Cloudflare settings (npm run cloud:setup makes wrangler.jsonc from it)
 console-ui/             The app (plain HTML, CSS, JS), its typeface, app manifest, icons and service worker
-web/                    Browser build: entry, Node shims, and the static demo site
+web/                    Browser builds: the app demo (web/app), its entry, Node shims, and the earlier demo page
 scripts/                demo, console, reset, gads:*, cloud:*, test runner
 test/                   node:test suites, with a fake Google Ads API
 test/e2e/               The cloud end-to-end check (wrangler dev, Playwright, a virtual passkey, an AI stand-in)
