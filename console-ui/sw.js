@@ -22,6 +22,8 @@ self.addEventListener('push', (event) => {
       badge: '/icons/icon-192.png',
       data: { url },
       renotify: true,
+      // Urgent news (a broken page, broken tracking, risky copy) stays on a computer screen until it is seen.
+      requireInteraction: msg.urgent === true,
     }),
   );
 });

@@ -302,12 +302,18 @@ class Cloud {
     const read = (f: string) => (fs.existsSync(path.join(dataDir, f)) ? fs.readFileSync(path.join(dataDir, f), 'utf8') : '');
     const audit = read('audit.jsonl');
     if (!audit.trim()) return 'No history on this computer to move.';
-    const res = await this.ctx.fetch(`${url}/admin/import`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ proposals: read('proposals.json'), audit, sandbox: read('sandbox.json') }),
-    });
-    const body = (await res.json().catch(() => ({}))) as { entries?: number; proposals?: number; error?: string };
+    const payload = JSON.stringify({ proposals: read('proposals.json'), audit, sandbox: read('sandbox.json') });
+    // A new import key takes a minute or two to reach every Cloudflare location, so a refusal is retried for a while.
+    let res: Response | undefined;
+    let body: { entries?: number; proposals?: number; error?: string } = {};
+    for (let attempt = 0; attempt < 40; attempt++) {
+      res = await this.ctx.fetch(`${url}/admin/import`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: payload });
+      body = (await res.json().catch(() => ({}))) as typeof body;
+      if (res.status !== 401) break;
+      if (attempt === 0) this.step('Waiting for the new secrets to reach Cloudflare (up to two minutes)');
+      await new Promise((r) => setTimeout(r, this.ctx.pollMs * 2));
+    }
+    if (!res) throw new Stop('Moving your history failed.');
     if (res.ok) return `Moved your history to the cloud: ${body.proposals} proposals and ${body.entries} audit entries, hash chain checked.`;
     if (res.status === 409) return `History not moved: ${body.error}`;
     throw new Stop(`Moving your history failed: ${body.error ?? res.status}`, ['Your laptop copy is untouched. Run the same command again.']);
@@ -331,6 +337,9 @@ class Cloud {
     this.line('3. Press Connect. Campaign Ops asks for your passkey to allow Claude.');
     this.line('4. On this computer, run: npm run cloud:unlink-desktop');
     this.line('   so Claude Desktop stops starting the old local copy.');
+    this.title('Autopilot');
+    this.line('It checks your accounts every hour and reviews them every morning at 7:00 (Chicago time;');
+    this.line('change it in Settings). Fixes wait for your passkey, then apply on their own.');
     this.ctx.print('');
   }
 
@@ -377,6 +386,7 @@ class Cloud {
     const url = await this.deploy();
     this.saveState({ ...this.readState(), url, deployedAt: new Date().toISOString() });
     this.ok('Updated. Your passkeys, notifications, proposals and audit log are unchanged.');
+    this.info('Autopilot now checks every hour and reviews every morning. Open the app to see it, or tap Check now.');
   }
 
   async code(): Promise<void> {

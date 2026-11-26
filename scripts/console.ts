@@ -35,7 +35,7 @@ if (await consoleIsRunning(port)) {
   process.exit(0);
 }
 
-const handle = await startConsole({ engine: app.engine, backend: app.backend, token: app.config.consoleToken, port, uiDir: app.uiDir, version: app.version });
+const handle = await startConsole({ engine: app.engine, backend: app.backend, token: app.config.consoleToken, port, uiDir: app.uiDir, version: app.version, autopilot: app.autopilot, tick: process.env.CAMPAIGN_OPS_AUTOPILOT !== 'off' });
 console.log('\nCampaign Ops approval console is running.');
 console.log(`Open: ${handle.urlWithKey}`);
 console.log('The link contains your console key. Do not share it.');
