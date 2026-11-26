@@ -116,7 +116,10 @@ export async function laptopHistory() {
   await engine.approve(p.id, { by: 'Deb (console)', channel: 'console' });
   await engine.apply(p.id, { actor: 'agent (laptop)' });
   const read = (f) => fs.readFileSync(path.join(dir, f), 'utf8');
-  const out = { proposals: read('proposals.json'), audit: read('audit.jsonl'), sandbox: read('sandbox.json'), entries: read('audit.jsonl').trim().split('\n').length };
+  // Pad the sandbox like a laptop that has been in use for weeks, so the move is far bigger than an ordinary request.
+  const sandboxFile = JSON.parse(read('sandbox.json'));
+  sandboxFile.e2ePadding = 'x'.repeat(400_000);
+  const out = { proposals: read('proposals.json'), audit: read('audit.jsonl'), sandbox: JSON.stringify(sandboxFile), entries: read('audit.jsonl').trim().split('\n').length };
   fs.rmSync(dir, { recursive: true, force: true });
   return out;
 }

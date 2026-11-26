@@ -40,6 +40,8 @@ const SETUP_TRIES = 5;
 const SETUP_WINDOW_MS = 15 * 60_000;
 const ADD_PASSKEY_FRESH_MS = 10 * 60_000;
 const MAX_CHALLENGES = 50;
+const BODY_MAX_CHARS = 64_000;
+const IMPORT_MAX_CHARS = 20_000_000;
 /** Daily limits for the two OAuth steps anyone can start (see allowOAuthWrite). */
 const OAUTH_DAILY = { authorize: 60, register: 20 } as const;
 
@@ -286,7 +288,8 @@ export class CampaignOps extends DurableObject<Env> {
         if (url.pathname !== '/admin/import' && origin !== url.origin) return json(403, { error: 'Cross-site request refused.' });
         if (!(request.headers.get('Content-Type') ?? '').toLowerCase().startsWith('application/json')) return json(415, { error: 'Content-Type must be application/json.' });
       }
-      const body = request.method === 'POST' ? await this.readJson(request) : {};
+      // The one-time history move carries the whole laptop record; everything else is small.
+      const body = request.method === 'POST' ? await this.readJson(request, url.pathname === '/admin/import' ? IMPORT_MAX_CHARS : BODY_MAX_CHARS) : {};
       if (url.pathname.startsWith('/auth/')) return await this.auth(request, url, body);
       if (url.pathname.startsWith('/api/')) return await this.api(request, url, body);
       if (url.pathname === '/admin/import' && request.method === 'POST') return await this.importHistory(request, body);
@@ -298,9 +301,9 @@ export class CampaignOps extends DurableObject<Env> {
     }
   }
 
-  private async readJson(request: Request): Promise<Record<string, unknown>> {
+  private async readJson(request: Request, max: number): Promise<Record<string, unknown>> {
     const text = await request.text();
-    if (text.length > 64_000) throw new UserError('Request body too large.');
+    if (text.length > max) throw new UserError(max === IMPORT_MAX_CHARS ? 'The history is larger than 20 MB, too large to move in one go.' : 'Request body too large.');
     if (!text) return {};
     try {
       const v = JSON.parse(text);

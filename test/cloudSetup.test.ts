@@ -108,7 +108,8 @@ test('npm run cloud:setup, cloud:code and cloud:deploy against a stand-in for Cl
           const auth = String((init?.headers as Record<string, string>).Authorization);
           const body = JSON.parse(String(init?.body));
           imports.push({ auth, body });
-          if (auth !== `Bearer ${secrets().IMPORT_TOKEN}`) return Response.json({ error: 'Wrong or missing import token.' }, { status: 401 });
+          // The first try reaches a Cloudflare location that has not seen the new key yet.
+          if (imports.length === 1 || auth !== `Bearer ${secrets().IMPORT_TOKEN}`) return Response.json({ error: 'Wrong or missing import token.' }, { status: 401 });
           return Response.json({ ok: true, entries: body.audit.trim().split('\n').length, proposals: JSON.parse(body.proposals).proposals.length });
         }
         throw new Error(`unexpected fetch ${url}`);
@@ -129,9 +130,9 @@ test('npm run cloud:setup, cloud:code and cloud:deploy against a stand-in for Cl
     assert.equal(s.GOOGLE_ADS_KEY, key, 'the key goes up exactly as it is on disk');
     assert.equal(JSON.parse(s.GOOGLE_ADS_SETTINGS).keyFile, undefined, 'no path from this computer goes up');
     assert.equal(JSON.parse(s.SETUP_CODE).hash, crypto.createHash('sha256').update(`campaign-ops-setup:${code!.replace(/-/g, '')}`).digest('base64url'));
-    assert.equal(imports.length, 1);
-    assert.equal(imports[0].body.audit, fs.readFileSync(path.join(root, 'data', 'audit.jsonl'), 'utf8'));
-    assert.ok(imports[0].body.sandbox.length > 1000, 'the sandbox comes along');
+    assert.equal(imports.length, 2, 'a refused first try is retried');
+    assert.equal(imports[1].body.audit, fs.readFileSync(path.join(root, 'data', 'audit.jsonl'), 'utf8'));
+    assert.ok(imports[1].body.sandbox.length > 1000, 'the sandbox comes along');
     assert.match(fs.readFileSync(path.join(root, 'cloud', 'wrangler.jsonc'), 'utf8'), /"id": "aaaabbbbccccddddeeeeffff00001111"/);
     assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'cloud', '.deployed.json'), 'utf8')).url, 'https://campaign-ops.deb-test.workers.dev');
     for (const f of fs.readdirSync(root, { recursive: true }) as string[]) {
@@ -149,7 +150,7 @@ test('npm run cloud:setup, cloud:code and cloud:deploy against a stand-in for Cl
     assert.deepEqual(bulk.keys!.sort(), ['GOOGLE_ADS_KEY', 'GOOGLE_ADS_SETTINGS', 'IMPORT_TOKEN', 'SETUP_CODE']);
     assert.equal(secrets().SESSION_SECRET, firstSession);
     assert.equal(secrets().VAPID_PUBLIC_KEY, firstVapid);
-    assert.equal(imports.length, 1);
+    assert.equal(imports.length, 2);
     assert.match(lines.join('\n'), /history was moved earlier/);
 
     // A new setup code touches only the setup code
