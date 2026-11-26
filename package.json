@@ -1,7 +1,7 @@
 {
   "name": "campaign-ops-mcp",
-  "version": "0.3.0",
-  "description": "An MCP server that lets AI agents change Google Ads campaigns safely: propose, dry run, human approval, apply, verify, rollback, with Fair Housing guardrails, a tamper-evident audit log checked against Google's own change history, and Pulse alarms. Works on a sandbox, a Google Ads test account or a live account (read-only until a person opens a change window).",
+  "version": "0.4.0",
+  "description": "An MCP server that lets AI agents change Google Ads campaigns safely: propose, dry run, human approval, apply, verify, rollback, with Fair Housing guardrails, a tamper-evident audit log checked against Google's own change history, and Pulse alarms. Runs on your computer or on Cloudflare's free plan, where every approval is signed with a passkey.",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -27,9 +27,10 @@
     "campaign-ops-mcp": "dist/src/index.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && tsc -p cloud/tsconfig.json",
     "start": "node dist/src/index.js",
     "test": "npm run build && node scripts/run-tests.mjs",
+    "test:cloud": "npm run build && node test/e2e/cloud.e2e.mjs",
     "demo": "npm run build && node dist/scripts/demo.js",
     "console": "node dist/scripts/console.js",
     "reset": "node dist/scripts/reset.js",
@@ -37,6 +38,10 @@
     "gads:check": "npm run build && node dist/scripts/gads-check.js",
     "gads:setup": "npm run build && node dist/scripts/gads-setup.js",
     "gads:add": "npm run build && node dist/scripts/gads-add.js",
+    "cloud:setup": "npm run build && node dist/scripts/cloud.js setup",
+    "cloud:deploy": "npm run build && node dist/scripts/cloud.js deploy",
+    "cloud:code": "npm run build && node dist/scripts/cloud.js code",
+    "cloud:unlink-desktop": "npm run build && node dist/scripts/cloud.js unlink-desktop",
     "build:web": "node scripts/build-web.mjs"
   },
   "dependencies": {
@@ -44,8 +49,11 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@cloudflare/workers-oauth-provider": "^1.4.0",
+    "@cloudflare/workers-types": "^5.20261125.1",
     "@types/node": "^22.20.5",
     "esbuild": "^0.28.2",
-    "typescript": "~5.9.3"
+    "typescript": "~5.9.3",
+    "wrangler": "^4.168.0"
   }
 }

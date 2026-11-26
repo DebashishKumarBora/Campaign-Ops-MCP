@@ -16,6 +16,17 @@ It runs on three kinds of account, side by side:
 
 ![The Campaign Ops approval console: account tabs with live-account locks, a budget change shown as a redline, Pulse alarms and the check against Google's own record](docs/approval-console.png)
 
+## What's new in 0.4: in the cloud, signed with your passkey
+
+- **Runs on Cloudflare's free plan.** `npm run cloud:setup` puts the MCP server and the approval console on your own Cloudflare account. Claude connects to it as a custom connector, from the web, desktop and phone apps.
+- **Passkeys, not passwords.** You sign in with a passkey (Face ID, Touch ID or Windows Hello). Every approval, undo, change window and resume is signed by that passkey over a hash of the exact change, and the console can check every stored signature again at any time.
+- **The AI still cannot approve.** Claude connects through OAuth 2.1 with PKCE, and allowing it takes your passkey. In the cloud there is no approval prompt inside the chat: changes are approved only in the console, signed.
+- **On your phone.** The console installs to the Home Screen and sends a notification when a change needs you, and each morning when Pulse or the witness check finds something new.
+- **Your history comes along.** Setup moves the proposals and the audit log from your computer to the cloud once, after checking the hash chain.
+- **Tested end to end on the real runtime:** `npm run test:cloud` runs the Worker in Cloudflare's own runtime with a virtual passkey, a fake Google Ads API and a push service that decrypts every notification.
+
+![Three phone screens: setting up a passkey with a one-time code, approving a budget change with the passkey and its fingerprint, and the record showing the signature checks out](docs/cloud-phone.png)
+
 ## What's new in 0.3
 
 - **Live accounts, read-only by default.** `npm run gads:add` connects a real Google Ads account. Campaign Ops reads its real numbers, but nothing can change until a person opens a time-boxed change window in the console by typing the account's name. No tool can open one.
@@ -53,7 +64,7 @@ flowchart LR
 
 | Guardrail | What it does |
 |---|---|
-| No self-approval | There is no approve tool. Only a person can approve, through an approval prompt in the chat app (MCP elicitation) or the local approval console. |
+| No self-approval | There is no approve tool. Only a person can approve: on a computer through an approval prompt in the chat app (MCP elicitation) or the local console; in the cloud only in the console, with a passkey signature over the exact change. |
 | Live accounts stay read-only | A live account can be read and proposals can be approved, but nothing is applied until a person opens a change window in the console. Windows last 1 to 8 hours, end on their own, and can be locked early. The backend itself refuses live writes without one. |
 | Scopes | `read`, `propose` or `execute`. Tools outside the scope are not even listed to the AI. |
 | Budget limits | Step limits per change (+30% / -50% by default), a per-campaign range, and an account-wide daily cap. |
@@ -95,8 +106,9 @@ Requires [Node.js](https://nodejs.org) 22 or newer (any current LTS) and Git.
 git clone https://github.com/debashishkumarbora/campaign-ops-mcp.git
 cd campaign-ops-mcp
 npm install
-npm test        # 75 tests: guardrails, live accounts, Pulse, witness, console security, MCP over stdio, Google Ads API
+npm test        # 98 tests: guardrails, live accounts, Pulse, witness, passkeys, push, console security, MCP over stdio, Google Ads API
 npm run demo    # a narrated run through every guardrail
+npm run test:cloud   # optional: the cloud version end to end, 24 steps (needs Playwright with Chromium)
 ```
 
 Everything runs against a sandbox account with synthetic data. No Google account is needed yet.
@@ -151,7 +163,44 @@ Campaign Ops runs as a local (stdio) MCP server. Point your MCP client at the bu
 }
 ```
 
-On Windows, use a path like `E:\\campaign-ops-mcp\\dist\\src\\index.js`. Then ask: *"Run a health check on my ad account and propose fixes."* The server also ships two prompts, `account_health_check` and `fix_wasted_spend`.
+On Windows, use a path like `C:\\Users\\you\\campaign-ops-mcp\\dist\\src\\index.js`. Running it in the cloud instead? Add it as a connector (below) and remove this entry. Then ask: *"Run a health check on my ad account and propose fixes."* The server also ships two prompts, `account_health_check` and `fix_wasted_spend`.
+
+## Run it in the cloud
+
+You need a free [Cloudflare](https://dash.cloudflare.com/sign-up) account. In the project folder:
+
+```bash
+npm run cloud:setup
+```
+
+It signs you in to Cloudflare (a browser window opens the first time), uploads Campaign Ops, saves its secrets in Cloudflare, moves your history there once, and prints your address and a one-hour setup code. Then:
+
+1. On your phone, open the address, type the setup code, and create your passkey.
+2. On iPhone, tap Share, then Add to Home Screen. Open Campaign Ops from the Home Screen, sign in with Face ID, and turn on notifications.
+3. In Claude, open Customize, then Connectors, then Add custom connector. Use your address followed by `/mcp`. Press Connect and allow it with your passkey.
+4. On your computer, run `npm run cloud:unlink-desktop` so Claude Desktop stops starting the local copy.
+
+| Command | What it does |
+|---|---|
+| `npm run cloud:setup` | First setup, or a fresh setup code plus new Google Ads settings. Existing session and notification keys are kept |
+| `npm run cloud:deploy` | Updates the code after you download a new version. Secrets, passkeys and history stay as they are |
+| `npm run cloud:code` | A new one-hour setup code, to add a passkey on a device when no signed-in device is at hand |
+| `npm run cloud:unlink-desktop` | Removes the local Campaign Ops entry from Claude Desktop, after saving a copy of its settings |
+
+To add a computer, sign in on it with your phone (choose the option to use a phone and scan the code), then add its own passkey under Record. Or use `npm run cloud:code`. Passkeys belong to the address they were made on: if you later move Campaign Ops to your own domain, make passkeys there with a setup code.
+
+**What runs where**
+
+| Part | On Cloudflare |
+|---|---|
+| MCP server for Claude | A Worker at `/mcp`, behind OAuth 2.1 ([workers-oauth-provider](https://github.com/cloudflare/workers-oauth-provider)) |
+| Approval console | Static files served by the same Worker, with a strict Content Security Policy |
+| Proposals, audit log, passkeys, sandbox | One Durable Object with its own SQLite database. The unchanged engine runs inside it: `node:fs` is swapped for a small file layer on SQLite |
+| Connector grants and tokens | Workers KV, tokens stored only as hashes |
+| Morning watch | A cron trigger at 13:07 UTC runs Pulse and the witness check on every account |
+| Robot key, session and notification keys | Encrypted Worker secrets. None is written into the project folder |
+
+**Free plan.** Cloudflare's free plan gives each request 10 ms of CPU, with some flexibility for the occasional longer one. Campaign Ops requests take a few milliseconds once warm, and the console polls only while it is on screen. If you ever see "Worker exceeded resource limits", the Workers Paid plan lifts it.
 
 ## Connect a Google Ads test account
 
@@ -249,9 +298,18 @@ Copy `.env.example` to `.env` to change settings, and edit `policy.json` to chan
 - Runaway loops: rate limits, cooldowns, one open proposal per target, and the kill switch.
 - Quiet history edits: the hash-chained audit log.
 
+**In the cloud, also**
+
+- A connected AI approving or unlocking anything: approve, undo, change windows and resume each need a passkey signature made in the console. Allowing a connector needs one too, and the chat approval prompt is turned off.
+- A signature reused for something else: each passkey challenge commits to the action, its target and, for an approval, the hash of the exact change. Challenges work once and expire after five minutes. If the change no longer matches, the approval is refused.
+- A stolen session cookie: it can look, reject and pause, nothing more. The cookie is `__Host-`, HttpOnly, Secure and SameSite=Strict, and removing a passkey ends its sessions.
+- Someone who finds the address: there is no password to guess. Setup codes work once, for one hour, with five tries per 15 minutes.
+- Notifications as a side door: they go only to the browsers' own push services, encrypted end to end (RFC 8291) and signed (RFC 8292).
+- Strangers using up the free quota: opening the connect page and registering an app have a daily budget, and stored sign-in challenges are capped.
+
 **Out of scope**
 
-- A compromised computer, or an MCP client that fakes the approval prompt.
+- A compromised computer, a compromised Cloudflare account, or an MCP client that fakes the approval prompt.
 - An agent that also has file access to the data folder. Do not give the same agent a filesystem tool for this folder.
 - Legal review. The Fair Housing checks are a screening aid, not legal advice.
 
@@ -267,7 +325,7 @@ Section 804(c) of the Fair Housing Act prohibits housing ads that state a prefer
 - [ ] **Milestone 2:** approval card inside the chat with [MCP Apps](https://blog.modelcontextprotocol.io/posts/2026-01-26-mcp-apps/)
 - [x] **Milestone 3:** Google Ads test-account backend (real API calls, no ads served, no spend). Live run done: Claude found a Fair Housing problem in a real Google Ads test account, a person approved the fix, and the agent rewrote the ad through the Google Ads API
 - [x] **Real-account mode (0.3):** live accounts read-only until a person opens a change window, Pulse alarms, the witness check against Google's change history, approve links, single-ad pause, and a phone-ready console
-- [ ] **Milestone 4:** the approval console and a remote MCP server on Cloudflare Workers, to approve from a phone anywhere
+- [x] **Milestone 4 (0.4):** a remote MCP server and the approval console on Cloudflare Workers, with passkey-signed approvals, OAuth for Claude, phone notifications and a morning watch
 - [ ] **Milestone 5:** daily autopilot that runs diagnostics and Pulse, and queues proposals for approval
 - [ ] **Milestone 6:** evaluation suite that scores agent runs for safe behavior
 
@@ -290,12 +348,19 @@ src/
     sandbox.ts, seed.ts Synthetic account with planted problems and its own change history
     router.ts           Sandbox and Google Ads accounts side by side
     googleAds/          Google Ads API: robot login, REST client, backend, sample campaigns
-  console/server.ts     Approval console HTTP server
+  console/api.ts        The console's API, shared by the local server and the cloud
+  console/server.ts     Approval console HTTP server (local)
+  cloud/                Passkeys (WebAuthn), signed sessions, web push, and the file layer on SQLite
   util/time.ts          Account time zones (Google reports dates and change times in them)
-console-ui/             Console page (plain HTML, CSS, JS) and its typeface
+cloud/
+  src/worker.ts         The Worker: OAuth for the MCP endpoint, the passkey consent page, security headers, cron
+  src/ops.ts            The Durable Object: engine, console API, passkeys, notifications, history import
+  wrangler.base.jsonc   Cloudflare settings (npm run cloud:setup makes wrangler.jsonc from it)
+console-ui/             Console page (plain HTML, CSS, JS), its typeface, app manifest, icons and service worker
 web/                    Browser build: entry, Node shims, and the static demo site
-scripts/                demo, console, reset, gads:check, gads:setup, gads:add, test runner
+scripts/                demo, console, reset, gads:*, cloud:*, test runner
 test/                   node:test suites, with a fake Google Ads API
+test/e2e/               The cloud end-to-end check (wrangler dev, Playwright, a virtual passkey)
 ```
 
 ## License
