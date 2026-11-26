@@ -1,8 +1,9 @@
-import type { AdsBackend, MutateResult } from '../backend.js';
-import type { Account, Ad, BackendMode, Campaign, Change, ChannelType, DailyMetric, MatchType, NegativeKeyword, SearchTermRow } from '../../types.js';
+import type { AdsBackend, MutateOptions, MutateResult } from '../backend.js';
+import type { Account, Ad, BackendMode, Campaign, Change, ChangeEvent, ChannelType, DailyMetric, MatchType, NegativeKeyword, SearchTermRow } from '../../types.js';
 import { UserError } from '../../types.js';
 import { buildSandboxState, defaultEndDate, SPECS, type SandboxState } from '../seed.js';
-import { normalizeKeyword, round2 } from '../../util/format.js';
+import { addDays, money, normalizeKeyword, round2 } from '../../util/format.js';
+import { dayInZone, localInZone, zonedToUtcMs } from '../../util/time.js';
 import type { GoogleAdsClient } from './client.js';
 import { explain } from './errors.js';
 import { dashed, digits, type GoogleAdsAccountSetting, type GoogleAdsSettings } from './settings.js';
@@ -10,24 +11,28 @@ import { dashed, digits, type GoogleAdsAccountSetting, type GoogleAdsSettings } 
 /**
  * A real Google Ads account behind the same interface as the sandbox.
  *
- * Campaigns, budgets, statuses, negative keywords and ad copy are read from
- * and written to Google Ads, with Google's own validate-only dry run.
+ * Campaigns, budgets, statuses, negative keywords, ads and ad copy are read
+ * from and written to Google Ads, with Google's own validate-only dry run.
  *
- * Performance numbers are simulated: test accounts never serve ads, so Google
- * reports no impressions, clicks or cost for them. Campaigns created by
- * npm run gads:setup carry the same names as the sandbox campaigns, and their
- * performance history comes from the same seeded simulation. Every report
- * from this backend says so.
+ * Performance numbers:
+ *  - Live accounts: real numbers from Google (metrics and search terms).
+ *  - Test accounts: simulated. Test accounts never serve ads, so Google has no
+ *    clicks or cost to report. Campaigns created by npm run gads:setup carry
+ *    the sandbox names and take their history from the same seeded simulation.
  *
- * Changes are refused unless Google confirms the account is a test account.
+ * Writes:
+ *  - Test accounts: allowed once Google confirms the account is a test account.
+ *  - Live accounts: refused unless the governance engine says a person has an
+ *    open change window (MutateOptions.liveAccess). Dry runs are always allowed
+ *    because they never change anything.
  */
 
 export interface GoogleAdsBackendOptions {
   settings: GoogleAdsSettings;
   client: GoogleAdsClient;
-  /** Allow changes to live (non-test) accounts. Off unless the environment turns it on. */
-  allowLive?: boolean;
   now?: () => Date;
+  /** How long fetched performance numbers are reused, in milliseconds. */
+  cacheMs?: number;
 }
 
 interface CampaignRow {
@@ -37,10 +42,11 @@ interface CampaignRow {
 
 interface AdRow {
   adGroupAd?: {
+    resourceName?: string;
     status?: string;
     ad?: { id?: string; finalUrls?: string[]; responsiveSearchAd?: { headlines?: Array<{ text?: string }>; descriptions?: Array<{ text?: string }> } };
   };
-  adGroup?: { name?: string };
+  adGroup?: { id?: string; name?: string };
   campaign?: { id?: string };
 }
 
@@ -48,19 +54,76 @@ interface CriterionRow {
   campaignCriterion?: { resourceName?: string; status?: string; keyword?: { text?: string; matchType?: string } };
 }
 
+interface MetricRow {
+  campaign?: { id?: string };
+  segments?: { date?: string };
+  metrics?: { impressions?: string | number; clicks?: string | number; costMicros?: string | number; conversions?: number | string; searchBudgetLostImpressionShare?: number | string };
+}
+
+interface TermRow {
+  searchTermView?: { searchTerm?: string };
+  campaign?: { id?: string };
+  metrics?: { impressions?: string | number; clicks?: string | number; costMicros?: string | number; conversions?: number | string };
+}
+
+interface ChangeRow {
+  changeEvent?: {
+    changeDateTime?: string;
+    changeResourceType?: string;
+    changeResourceName?: string;
+    clientType?: string;
+    userEmail?: string;
+    resourceChangeOperation?: string;
+    changedFields?: string;
+    campaign?: string;
+    oldResource?: Record<string, any>;
+    newResource?: Record<string, any>;
+  };
+}
+
 type Plan = { resource: string; operations: unknown[] } | { errors: string[] };
 
-const CHANNELS: Record<string, ChannelType> = { SEARCH: 'SEARCH', DISPLAY: 'DISPLAY', PERFORMANCE_MAX: 'PERFORMANCE_MAX' };
+const CHANNELS: Record<string, ChannelType> = {
+  SEARCH: 'SEARCH',
+  DISPLAY: 'DISPLAY',
+  PERFORMANCE_MAX: 'PERFORMANCE_MAX',
+  VIDEO: 'VIDEO',
+  DEMAND_GEN: 'DEMAND_GEN',
+  DISCOVERY: 'DEMAND_GEN',
+  SHOPPING: 'SHOPPING',
+};
 const MATCH_TYPES: MatchType[] = ['EXACT', 'PHRASE', 'BROAD'];
+
+const CLIENTS: Record<string, string> = {
+  GOOGLE_ADS_API: 'Google Ads API',
+  GOOGLE_ADS_WEB_CLIENT: 'Google Ads web',
+  GOOGLE_ADS_EDITOR: 'Google Ads Editor',
+  GOOGLE_ADS_MOBILE_APP: 'Google Ads app',
+  GOOGLE_ADS_SCRIPTS: 'Google Ads scripts',
+  GOOGLE_ADS_AUTOMATED_RULE: 'Automated rule',
+  GOOGLE_ADS_BULK_UPLOAD: 'Bulk upload',
+  GOOGLE_ADS_RECOMMENDATIONS: 'Google recommendations',
+  GOOGLE_ADS_RECOMMENDATIONS_SUBSCRIPTION: 'Auto-applied recommendation',
+  SEARCH_ADS_360_SYNC: 'Search Ads 360',
+  SEARCH_ADS_360_POST: 'Search Ads 360',
+  INTERNAL_TOOL: 'Google support',
+};
 
 /** IDs go straight into queries, so only plain digits are accepted. */
 const numericId = (id: string): string | null => (/^\d{1,20}$/.test(String(id ?? '').trim()) ? String(id).trim() : null);
+const num = (v: unknown): number => {
+  const n = Number(v ?? 0);
+  return Number.isFinite(n) ? n : 0;
+};
+const statusWord = (s?: string) => (s === 'ENABLED' ? 'Enabled' : s === 'PAUSED' ? 'Paused' : s === 'REMOVED' ? 'Removed' : String(s ?? 'unknown').toLowerCase());
+const camelToSnake = (f: string) => f.trim().replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
 
 export class GoogleAdsBackend implements AdsBackend {
   readonly mode: BackendMode;
   private readonly client: GoogleAdsClient;
   private readonly names = new Map<string, string>();
   private readonly confirmedTest = new Map<string, boolean>();
+  private readonly metricCache = new Map<string, { at: number; rows: Map<string, DailyMetric[]>; dates: string[] }>();
   private simState?: SandboxState;
 
   constructor(private readonly opts: GoogleAdsBackendOptions) {
@@ -84,13 +147,24 @@ export class GoogleAdsBackend implements AdsBackend {
   }
 
   private toAccount(a: GoogleAdsAccountSetting): Account {
-    return { id: dashed(a.id), name: a.name, currency: a.currency, timezone: a.timezone, mode: a.testAccount ? 'google_ads_test' : 'google_ads' };
+    return {
+      id: dashed(a.id),
+      name: a.name,
+      currency: a.currency,
+      timezone: a.timezone,
+      mode: a.testAccount ? 'google_ads_test' : 'google_ads',
+      numbers: a.testAccount ? 'simulated' : 'live',
+    };
+  }
+
+  private login(a: GoogleAdsAccountSetting): { login?: string } {
+    return a.loginCustomerId ? { login: a.loginCustomerId } : {};
   }
 
   /** Reads from Google; any API problem becomes a plain-English UserError. */
   private async search<T>(a: GoogleAdsAccountSetting, query: string): Promise<T[]> {
     try {
-      return await this.client.search<T>(digits(a.id), query);
+      return await this.client.search<T>(digits(a.id), query, this.login(a));
     } catch (e) {
       throw new UserError(explain(e));
     }
@@ -98,8 +172,8 @@ export class GoogleAdsBackend implements AdsBackend {
 
   private toCampaign(a: GoogleAdsAccountSetting, row: CampaignRow): Campaign | undefined {
     const c = row.campaign;
-    const channel = CHANNELS[String(c?.advertisingChannelType ?? '')];
-    if (!c?.id || !c.name || !channel) return undefined;
+    if (!c?.id || !c.name) return undefined;
+    const channel = CHANNELS[String(c.advertisingChannelType ?? '')] ?? 'OTHER';
     this.names.set(`${a.id}:${c.id}`, c.name);
     return {
       id: String(c.id),
@@ -119,6 +193,7 @@ export class GoogleAdsBackend implements AdsBackend {
     return {
       id: String(ad.id),
       campaignId: String(row.campaign.id),
+      adGroupId: row.adGroup?.id ? String(row.adGroup.id) : undefined,
       adGroupName: row.adGroup?.name ?? '',
       status: row.adGroupAd?.status === 'ENABLED' ? 'ENABLED' : 'PAUSED',
       headlines: text(ad.responsiveSearchAd?.headlines),
@@ -166,6 +241,16 @@ export class GoogleAdsBackend implements AdsBackend {
     return (await this.getCampaign(a.id, campaignId))?.name;
   }
 
+  /** The last `days` complete days in the account's time zone, oldest first. */
+  private window(a: GoogleAdsAccountSetting, days: number): { from: string; to: string; dates: string[] } {
+    const n = Math.max(1, Math.min(90, Math.round(days)));
+    const to = addDays(dayInZone(this.now().getTime(), a.timezone), -1);
+    const from = addDays(to, -(n - 1));
+    const dates: string[] = [];
+    for (let i = 0; i < n; i++) dates.push(addDays(from, i));
+    return { from, to, dates };
+  }
+
   private sim(): SandboxState {
     const endDate = defaultEndDate(this.now());
     if (!this.simState || this.simState.endDate !== endDate) this.simState = buildSandboxState({ endDate });
@@ -177,8 +262,52 @@ export class GoogleAdsBackend implements AdsBackend {
     return SPECS.find((s) => s.name.toLowerCase() === n)?.id;
   }
 
+  /** Real daily numbers for every campaign in one query, reused for a short while. */
+  private async liveMetrics(a: GoogleAdsAccountSetting, days: number): Promise<{ rows: Map<string, DailyMetric[]>; dates: string[] }> {
+    const w = this.window(a, days);
+    const key = `${a.id}:${w.from}:${w.to}`;
+    const hit = this.metricCache.get(key);
+    if (hit && this.now().getTime() - hit.at < (this.opts.cacheMs ?? 120_000)) return hit;
+    const raw = await this.search<MetricRow>(
+      a,
+      `SELECT campaign.id, campaign.advertising_channel_type, segments.date, metrics.impressions, metrics.clicks, metrics.cost_micros,
+              metrics.conversions, metrics.search_budget_lost_impression_share
+       FROM campaign
+       WHERE segments.date BETWEEN '${w.from}' AND '${w.to}' AND campaign.status != 'REMOVED'`,
+    );
+    const byCampaign = new Map<string, Map<string, DailyMetric>>();
+    for (const r of raw) {
+      const id = r.campaign?.id ? String(r.campaign.id) : '';
+      const date = r.segments?.date;
+      if (!id || !date) continue;
+      if (!byCampaign.has(id)) byCampaign.set(id, new Map());
+      const m = r.metrics ?? {};
+      const row: DailyMetric = {
+        date,
+        impressions: num(m.impressions),
+        clicks: num(m.clicks),
+        cost: round2(num(m.costMicros) / 1_000_000),
+        conversions: round2(num(m.conversions)),
+      };
+      const channel = (r as { campaign?: { advertisingChannelType?: string } }).campaign?.advertisingChannelType;
+      if (channel === 'SEARCH' && row.impressions > 0) row.searchLostIsBudget = round2(num(m.searchBudgetLostImpressionShare));
+      byCampaign.get(id)!.set(date, row);
+    }
+    const rows = new Map<string, DailyMetric[]>();
+    for (const [id, byDate] of byCampaign) {
+      rows.set(id, w.dates.map((d) => byDate.get(d) ?? { date: d, impressions: 0, clicks: 0, cost: 0, conversions: 0 }));
+    }
+    const entry = { at: this.now().getTime(), rows, dates: w.dates };
+    this.metricCache.set(key, entry);
+    return entry;
+  }
+
   async getDailyMetrics(accountId: string, campaignId: string, days: number): Promise<DailyMetric[]> {
     const a = this.need(accountId);
+    if (!a.testAccount) {
+      const live = await this.liveMetrics(a, days);
+      return (live.rows.get(String(campaignId)) ?? live.dates.map((d) => ({ date: d, impressions: 0, clicks: 0, cost: 0, conversions: 0 }))).map((r) => ({ ...r }));
+    }
     const name = await this.campaignName(a, campaignId);
     const spec = name ? this.specIdFor(name) : undefined;
     const rows = spec ? (this.sim().metrics[spec] ?? []) : [];
@@ -186,6 +315,8 @@ export class GoogleAdsBackend implements AdsBackend {
   }
 
   async getSearchTerms(accountId: string, opts: { campaignId?: string; days: number }): Promise<SearchTermRow[]> {
+    const a = this.need(accountId);
+    if (!a.testAccount) return this.liveSearchTerms(a, opts);
     const campaigns = await this.listCampaigns(accountId);
     const realIdBySpec = new Map<string, string>();
     for (const c of campaigns) {
@@ -210,9 +341,40 @@ export class GoogleAdsBackend implements AdsBackend {
     return out;
   }
 
+  /** Real search terms, summed per campaign (Google reports them per ad group). */
+  private async liveSearchTerms(a: GoogleAdsAccountSetting, opts: { campaignId?: string; days: number }): Promise<SearchTermRow[]> {
+    const w = this.window(a, opts.days);
+    let where = `segments.date BETWEEN '${w.from}' AND '${w.to}' AND metrics.cost_micros > 0`;
+    if (opts.campaignId !== undefined) {
+      const id = numericId(opts.campaignId);
+      if (!id) return [];
+      where += ` AND campaign.id = ${id}`;
+    }
+    const raw = await this.search<TermRow>(
+      a,
+      `SELECT search_term_view.search_term, campaign.id, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions
+       FROM search_term_view WHERE ${where} ORDER BY metrics.cost_micros DESC LIMIT 5000`,
+    );
+    const merged = new Map<string, SearchTermRow>();
+    for (const r of raw) {
+      const term = r.searchTermView?.searchTerm;
+      const campaignId = r.campaign?.id ? String(r.campaign.id) : '';
+      if (!term || !campaignId) continue;
+      const key = `${campaignId}|${term.toLowerCase()}`;
+      const m = r.metrics ?? {};
+      const row = merged.get(key) ?? { campaignId, term, impressions: 0, clicks: 0, cost: 0, conversions: 0 };
+      row.impressions += num(m.impressions);
+      row.clicks += num(m.clicks);
+      row.cost = round2(row.cost + num(m.costMicros) / 1_000_000);
+      row.conversions = round2(row.conversions + num(m.conversions));
+      merged.set(key, row);
+    }
+    return [...merged.values()].sort((x, y) => y.cost - x.cost);
+  }
+
   private adQuery(where: string): string {
-    return `SELECT ad_group_ad.ad.id, ad_group_ad.ad.final_urls, ad_group_ad.ad.responsive_search_ad.headlines,
-              ad_group_ad.ad.responsive_search_ad.descriptions, ad_group_ad.status, ad_group.name, campaign.id
+    return `SELECT ad_group_ad.resource_name, ad_group_ad.ad.id, ad_group_ad.ad.final_urls, ad_group_ad.ad.responsive_search_ad.headlines,
+              ad_group_ad.ad.responsive_search_ad.descriptions, ad_group_ad.status, ad_group.id, ad_group.name, campaign.id
             FROM ad_group_ad
             WHERE ad_group_ad.status != 'REMOVED' AND ad_group_ad.ad.type = 'RESPONSIVE_SEARCH_AD' AND campaign.status != 'REMOVED'${where}`;
   }
@@ -261,33 +423,138 @@ export class GoogleAdsBackend implements AdsBackend {
     return (await this.negativeRows(a, campaignId)).map(({ text, matchType }) => ({ text, matchType }));
   }
 
+  // ---------- Google's own change history ----------
+
+  /**
+   * Google Ads keeps every change for 30 days: who made it, with what tool,
+   * and the values before and after. Campaign Ops checks itself against it.
+   */
+  async getChangeHistory(accountId: string, opts: { days: number }): Promise<ChangeEvent[]> {
+    const a = this.need(accountId);
+    const days = Math.max(1, Math.min(28, Math.round(opts.days)));
+    const nowMs = this.now().getTime();
+    const start = localInZone(nowMs - days * 86_400_000, a.timezone);
+    const end = localInZone(nowMs + 60_000, a.timezone);
+    const rows = await this.search<ChangeRow>(
+      a,
+      `SELECT change_event.change_date_time, change_event.change_resource_type, change_event.change_resource_name, change_event.client_type,
+              change_event.user_email, change_event.resource_change_operation, change_event.changed_fields, change_event.campaign,
+              change_event.old_resource, change_event.new_resource
+       FROM change_event
+       WHERE change_event.change_date_time >= '${start}' AND change_event.change_date_time <= '${end}'
+       ORDER BY change_event.change_date_time DESC
+       LIMIT 10000`,
+    );
+    const robot = this.client.robotEmail.toLowerCase();
+    const out: ChangeEvent[] = [];
+    for (const r of rows) {
+      const e = r.changeEvent;
+      if (!e?.changeDateTime || !e.changeResourceName) continue;
+      const ms = zonedToUtcMs(e.changeDateTime, a.timezone);
+      if (!Number.isFinite(ms)) continue;
+      const op = e.resourceChangeOperation === 'CREATE' || e.resourceChangeOperation === 'REMOVE' ? e.resourceChangeOperation : 'UPDATE';
+      const campaignId = e.campaign?.split('/').pop() || /campaigns\/(\d+)/.exec(e.changeResourceName)?.[1] || /campaignCriteria\/(\d+)~/.exec(e.changeResourceName)?.[1];
+      const adId = /\/ads\/(\d+)$/.exec(e.changeResourceName)?.[1] ?? /adGroupAds\/\d+~(\d+)$/.exec(e.changeResourceName)?.[1];
+      const actor = String(e.userEmail ?? '').trim() || 'unknown';
+      const event: ChangeEvent = {
+        at: new Date(ms).toISOString(),
+        actor,
+        byRobot: actor.toLowerCase() === robot,
+        client: CLIENTS[String(e.clientType ?? '')] ?? String(e.clientType ?? 'Other').replace(/_/g, ' ').toLowerCase(),
+        operation: op,
+        resourceType: String(e.changeResourceType ?? 'UNKNOWN'),
+        resourceName: e.changeResourceName,
+        campaignId: campaignId || undefined,
+        adId: adId || undefined,
+        fields: String(e.changedFields ?? '')
+          .split(',')
+          .map((f) => f.trim())
+          .filter(Boolean)
+          .map(camelToSnake),
+        summary: '',
+      };
+      event.summary = await this.summarize(a, event, e.oldResource ?? {}, e.newResource ?? {});
+      out.push(event);
+    }
+    return out;
+  }
+
+  private async summarize(a: GoogleAdsAccountSetting, e: ChangeEvent, before: Record<string, any>, after: Record<string, any>): Promise<string> {
+    const name = e.campaignId ? (this.names.get(`${a.id}:${e.campaignId}`) ?? (await this.campaignName(a, e.campaignId).catch(() => undefined)) ?? `campaign ${e.campaignId}`) : '';
+    const of = name ? ` of ${name}` : '';
+    switch (e.resourceType) {
+      case 'CAMPAIGN_BUDGET': {
+        const old = before.campaignBudget?.amountMicros;
+        const now = after.campaignBudget?.amountMicros;
+        if (e.operation === 'CREATE') return `Created a budget of ${money(num(now) / 1_000_000, a.currency)}`;
+        if (old !== undefined && now !== undefined) return `Daily budget${of} changed from ${money(num(old) / 1_000_000, a.currency)} to ${money(num(now) / 1_000_000, a.currency)}`;
+        return `Budget${of} updated`;
+      }
+      case 'CAMPAIGN': {
+        if (e.operation === 'CREATE') return `Created campaign ${after.campaign?.name ?? name}`;
+        if (e.operation === 'REMOVE') return `Removed campaign ${name || e.resourceName}`;
+        if (e.fields.includes('status')) return `${name || 'Campaign'} changed from ${statusWord(before.campaign?.status)} to ${statusWord(after.campaign?.status)}`;
+        return `${name || 'Campaign'} settings updated (${e.fields.map((f) => f.replace(/[_.]/g, ' ')).join(', ') || 'details'})`;
+      }
+      case 'CAMPAIGN_CRITERION': {
+        const k = after.campaignCriterion?.keyword ?? before.campaignCriterion?.keyword;
+        const neg = (after.campaignCriterion ?? before.campaignCriterion)?.negative;
+        const what = k?.text ? `${neg ? 'negative keyword' : 'keyword'} "${k.text}"${k.matchType ? ` (${String(k.matchType).toLowerCase()})` : ''}` : 'a campaign setting';
+        if (e.operation === 'CREATE') return `Added ${what}${name ? ` to ${name}` : ''}`;
+        if (e.operation === 'REMOVE') return `Removed ${what}${name ? ` from ${name}` : ''}`;
+        return `Updated ${what}${name ? ` in ${name}` : ''}`;
+      }
+      case 'AD':
+        return `Copy of ad ${e.adId ?? ''}${name ? ` in ${name}` : ''} updated`.replace(/\s+/g, ' ');
+      case 'AD_GROUP_AD': {
+        if (e.operation === 'CREATE') return `Created ad ${e.adId ?? ''}${name ? ` in ${name}` : ''}`.replace(/\s+/g, ' ');
+        if (e.fields.includes('status')) return `Ad ${e.adId ?? ''}${name ? ` in ${name}` : ''} changed from ${statusWord(before.adGroupAd?.status)} to ${statusWord(after.adGroupAd?.status)}`.replace(/\s+/g, ' ');
+        return `Ad ${e.adId ?? ''} updated`.replace(/\s+/g, ' ');
+      }
+      default: {
+        const thing = e.resourceType.toLowerCase().replace(/_/g, ' ');
+        const verb = e.operation === 'CREATE' ? 'Created' : e.operation === 'REMOVE' ? 'Removed' : 'Updated';
+        return `${verb} ${thing}${name ? ` in ${name}` : ''}`;
+      }
+    }
+  }
+
   // ---------- changes ----------
 
-  /** Refuses to touch an account unless Google itself says it is a test account. */
-  private async assertChangeable(a: GoogleAdsAccountSetting): Promise<void> {
-    if (this.opts.allowLive) return;
+  /** Google's answer to "is this a test account?", asked once per account. */
+  private async isTestAccount(a: GoogleAdsAccountSetting): Promise<boolean> {
     let isTest = this.confirmedTest.get(a.id);
     if (isTest === undefined) {
       const rows = await this.search<{ customer?: { testAccount?: boolean } }>(a, 'SELECT customer.id, customer.test_account FROM customer LIMIT 1');
       isTest = Boolean(rows[0]?.customer?.testAccount);
       this.confirmedTest.set(a.id, isTest);
     }
-    if (!isTest) {
-      throw new UserError(`${a.name} (${dashed(a.id)}) is a live Google Ads account, not a test account. Campaign Ops only changes Google Ads test accounts for now, so nothing was sent.`);
-    }
+    return isTest;
   }
 
-  async mutate(accountId: string, change: Change, opts: { validateOnly: boolean }): Promise<MutateResult> {
+  async mutate(accountId: string, change: Change, opts: MutateOptions): Promise<MutateResult> {
     const a = this.find(accountId);
     if (!a) return { ok: false, errors: [`Unknown account ${accountId}`] };
     try {
-      await this.assertChangeable(a);
+      if (a.testAccount) {
+        // Saved as a test account: Google must agree, or nothing is sent at all (not even a dry run).
+        if (!(await this.isTestAccount(a))) {
+          throw new UserError(
+            `Google says ${a.name} (${dashed(a.id)}) is a live Google Ads account, not a test account, but it was saved as a test account. Nothing was sent. To manage it as a live account, run npm run gads:add: it stays read-only until a person opens a change window.`,
+          );
+        }
+      } else if (!opts.validateOnly && !opts.liveAccess) {
+        throw new UserError(
+          `${a.name} (${dashed(a.id)}) is a live Google Ads account and no change window is open, so nothing was sent. A person can open a change window in the approval console.`,
+        );
+      }
       const plan = await this.plan(a, change);
       if ('errors' in plan) return { ok: false, errors: plan.errors };
-      await this.client.mutate(digits(a.id), plan.resource, plan.operations, { validateOnly: opts.validateOnly });
+      await this.client.mutate(digits(a.id), plan.resource, plan.operations, { validateOnly: opts.validateOnly, ...this.login(a) });
+      if (!opts.validateOnly) this.metricCache.clear();
       return { ok: true, errors: [] };
     } catch (e) {
-      return { ok: false, errors: [explain(e)] };
+      return { ok: false, errors: [e instanceof UserError ? e.message : explain(e)] };
     }
   }
 
@@ -384,6 +651,18 @@ export class GoogleAdsBackend implements AdsBackend {
               updateMask: 'responsive_search_ad.headlines,responsive_search_ad.descriptions',
             },
           ],
+        };
+      }
+
+      case 'set_ad_status': {
+        const id = numericId(change.adId);
+        const ad = id ? await this.getAd(a.id, id) : undefined;
+        if (!id || !ad) return { errors: [`Unknown ad ${change.adId}`] };
+        if (!ad.adGroupId) return { errors: [`Google did not report the ad group for ad ${change.adId}.`] };
+        if (change.newStatus !== 'ENABLED' && change.newStatus !== 'PAUSED') return { errors: ['Status must be ENABLED or PAUSED.'] };
+        return {
+          resource: 'adGroupAds',
+          operations: [{ update: { resourceName: `customers/${customer}/adGroupAds/${ad.adGroupId}~${id}`, status: change.newStatus }, updateMask: 'status' }],
         };
       }
 

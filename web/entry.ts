@@ -7,6 +7,7 @@
 import { SandboxBackend } from '../src/backends/sandbox.js';
 import { Engine } from '../src/governance/engine.js';
 import { accountOverview, runDiagnostics } from '../src/governance/diagnostics.js';
+import { checkPulse } from '../src/governance/pulse.js';
 import { lintAd, protectedTermIn } from '../src/governance/fairHousing.js';
 import { AuditLog } from '../src/governance/audit.js';
 import { DEFAULT_POLICY } from '../src/policy.js';
@@ -27,6 +28,10 @@ export function createDemo() {
     account: ACCOUNT,
     diagnostics: (days = 30) => runDiagnostics(backend, DEFAULT_POLICY, ACCOUNT, days),
     overview: (days = 30) => accountOverview(backend, ACCOUNT, days),
+    /** Day-by-day alarms (the sandbox has a planted tracking outage). */
+    pulse: (days = 28) => checkPulse(backend, ACCOUNT, { days }),
+    /** The approval log checked against the sandbox's own change history. */
+    witness: (days = 14) => engine.witness(ACCOUNT, days),
     state: () => backend.load(),
     /** Edits one audit line in a scratch copy and verifies it, without touching the real log. */
     tamperTest: () => {

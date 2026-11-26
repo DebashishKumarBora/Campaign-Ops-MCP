@@ -24,14 +24,14 @@ export function tempDir(prefix = 'campaign-ops-test-'): string {
 
 export function makeRig(opts: { policy?: Partial<Policy>; scope?: Scope; forceKillSwitch?: boolean; dir?: string; realTime?: boolean } = {}): TestRig {
   const dir = opts.dir ?? tempDir();
-  const backend = new SandboxBackend(path.join(dir, 'sandbox.json'));
-  backend.ensure({ endDate: '2026-11-20' });
   const clock = {
     now: Date.parse('2026-11-21T15:00:00Z'),
     advanceMinutes(m: number) {
       this.now += m * 60_000;
     },
   };
+  const backend = new SandboxBackend(path.join(dir, 'sandbox.json'), { clock: opts.realTime ? undefined : () => clock.now });
+  backend.ensure({ endDate: '2026-11-20' });
   const policy: Policy = { ...structuredClone(DEFAULT_POLICY), ...(opts.policy ?? {}) } as Policy;
   const engine = new Engine({ backend, dataDir: dir, policy, scope: opts.scope ?? 'execute', forceKillSwitch: opts.forceKillSwitch, clock: opts.realTime ? undefined : () => clock.now });
   return { dir, backend, engine, clock, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };

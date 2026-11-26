@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { AdsBackend } from './backends/backend.js';
 import type { Engine, ApplyOutcome } from './governance/engine.js';
 import { accountOverview, runDiagnostics } from './governance/diagnostics.js';
+import { checkPulse } from './governance/pulse.js';
 import { lintAd } from './governance/fairHousing.js';
 import type { AppConfig } from './config.js';
 import type { Change, Proposal, ProposalStatus } from './types.js';
@@ -12,13 +13,15 @@ import { sleep } from './util/fsx.js';
 
 export const SERVER_INSTRUCTIONS = `Campaign Ops lets you analyze a Google Ads account and change it under human control.
 How to work:
-1. Start with run_diagnostics (or get_account_overview) and explain what you find in plain language with dollar amounts.
+1. Start with run_diagnostics (or get_account_overview) and explain what you find in plain language with dollar amounts. run_diagnostics also returns Pulse alarms (tracking outages, stalled campaigns, spend spikes); mention any alarm first, because a tracking outage makes every other number misleading.
 2. Every change goes through propose_change. You cannot approve changes. A person approves in their app's approval prompt or in the Campaign Ops approval console.
 3. Always give a clear reason. The person approving reads it.
-4. After proposing, call apply_change. It applies the change only if a person has approved it, then verifies the result.
+4. After proposing, show the person the approve_link from the result so they can approve in one click, then call apply_change. It applies the change only if a person has approved it, then verifies the result.
 5. Never say a change is live until apply_change returns status "applied" with verification "passed".
 6. If a proposal is blocked, read the failed checks and adjust. Never try to work around Fair Housing or policy blocks, and never re-word a protected-group exclusion to slip past the check.
-7. Check each account's mode in list_accounts. "sandbox" means all data is synthetic. "google_ads_test" means a real Google Ads test account: campaigns, budgets, keywords and ads are real and every change goes to Google, but performance numbers are simulated because test accounts never show ads. Say this when you report numbers for that account.`;
+7. Check each account's mode in list_accounts. "sandbox" means all data is synthetic. "google_ads_test" means a real Google Ads test account: campaigns, budgets, keywords and ads are real and every change goes to Google, but performance numbers are simulated because test accounts never show ads. "google_ads" means a live account with real numbers and real money: it is read-only until a person opens a change window in the approval console, so proposals can be approved but not applied until then. Say which kind of account you are reporting on.
+8. For an ad with a Fair Housing problem, the fastest safe step is set_ad_status PAUSED (the stopgap_change in run_diagnostics), then propose compliant copy with update_ad_text.
+9. verify_with_google compares Google's own change history with the approval log. Use it when the person asks whether anything changed without approval, or after applying changes.`;
 
 type Json = Record<string, unknown>;
 
@@ -69,6 +72,11 @@ const ChangeInput = z.discriminatedUnion('type', [
     headlines: z.array(z.string()).min(1).max(20).describe('The complete new list of headlines (each at most 30 characters).'),
     descriptions: z.array(z.string()).min(1).max(6).describe('The complete new list of descriptions (each at most 90 characters).'),
   }),
+  z.object({
+    type: z.literal('set_ad_status'),
+    ad_id: z.string().describe('Ad ID from get_ads.'),
+    new_status: z.enum(['ENABLED', 'PAUSED']).describe('PAUSED stops one ad; the rest of its ad group keeps running.'),
+  }),
 ]);
 
 type ChangeInputT = z.infer<typeof ChangeInput>;
@@ -83,6 +91,8 @@ export function toChange(input: ChangeInputT): Change {
       return { type: 'add_negative_keywords', campaignId: input.campaign_id, keywords: input.keywords.map((k) => ({ text: k.text, matchType: k.match_type })) };
     case 'update_ad_text':
       return { type: 'update_ad_text', adId: input.ad_id, headlines: input.headlines, descriptions: input.descriptions };
+    case 'set_ad_status':
+      return { type: 'set_ad_status', adId: input.ad_id, newStatus: input.new_status };
   }
 }
 
@@ -97,6 +107,8 @@ export function fromChange(change: Change): Json {
       return { type: change.type, campaign_id: change.campaignId, keywords: change.keywords.map((k) => ({ text: k.text, match_type: k.matchType })) };
     case 'update_ad_text':
       return { type: change.type, ad_id: change.adId, headlines: change.headlines, descriptions: change.descriptions };
+    case 'set_ad_status':
+      return { type: change.type, ad_id: change.adId, new_status: change.newStatus };
   }
 }
 
@@ -107,7 +119,7 @@ export function nextStep(p: Proposal): string {
     case 'blocked':
       return 'Blocked by policy. Read the failed checks, adjust the change and propose again. Do not try to work around Fair Housing blocks.';
     case 'pending_approval':
-      return `A person must approve ${p.id}. Call apply_change now: if your app supports approval prompts the person can approve there; otherwise ask them to approve it in the Campaign Ops approval console and call apply_change again (or pass wait_seconds).`;
+      return `A person must approve ${p.id}. Show them the approve_link (it opens the approval console on this proposal), then call apply_change: if your app supports approval prompts the person can approve there; otherwise call apply_change again once they approve (or pass wait_seconds).`;
     case 'approved':
       return `Approved by a person. Call apply_change with proposal_id "${p.id}".`;
     case 'applied':
@@ -127,10 +139,17 @@ export function nextStep(p: Proposal): string {
   }
 }
 
-export function proposalView(p: Proposal): Json {
+/** A link that opens the approval console on one proposal. It carries no secret: the console asks for its key. */
+export function approveLink(p: Proposal, consoleUrl?: string): string | undefined {
+  if (!consoleUrl || p.status !== 'pending_approval') return undefined;
+  return `${consoleUrl.replace(/\/?$/, '/')}#p=${p.id}`;
+}
+
+export function proposalView(p: Proposal, consoleUrl?: string): Json {
   return {
     id: p.id,
     status: p.status,
+    approve_link: approveLink(p, consoleUrl),
     type: p.typeLabel,
     target: p.targetLabel,
     summary: p.summary,
@@ -194,11 +213,25 @@ export function createMcpServer(deps: ServerDeps): McpServer {
 
   mcp.registerTool(
     'list_accounts',
-    { title: 'List accounts', description: 'Lists the ad accounts this server can reach, with their mode: sandbox (synthetic data), google_ads_test (a real Google Ads test account with simulated performance numbers) or google_ads (live).', inputSchema: {}, annotations: READ },
+    {
+      title: 'List accounts',
+      description:
+        'Lists the ad accounts this server can reach, with their mode: sandbox (synthetic data), google_ads_test (a real Google Ads test account with simulated performance numbers) or google_ads (a live account with real numbers, read-only until a person opens a change window). For live accounts it also says whether changes are currently allowed.',
+      inputSchema: {},
+      annotations: READ,
+    },
     () =>
       guard(async () => {
         const accounts = await backend.listAccounts();
-        return ok(`${accounts.length} account${accounts.length === 1 ? '' : 's'} available.`, { accounts });
+        const rows = [];
+        for (const a of accounts) {
+          const access = await engine.liveAccess(a.id);
+          rows.push({
+            ...a,
+            changes: access.required ? (access.open ? `allowed until ${access.until} (change window opened by ${access.openedBy})` : 'off: read-only until a person opens a change window in the approval console') : 'allowed with approval',
+          });
+        }
+        return ok(`${rows.length} account${rows.length === 1 ? '' : 's'} available.`, { accounts: rows });
       }),
   );
 
@@ -279,11 +312,22 @@ export function createMcpServer(deps: ServerDeps): McpServer {
           needs_copywriting: f.needsCopywriting
             ? { ad_id: f.needsCopywriting.adId, current_headlines: f.needsCopywriting.currentHeadlines, current_descriptions: f.needsCopywriting.currentDescriptions, flagged: f.needsCopywriting.flagged }
             : undefined,
+          stopgap_change: f.stopgapChange ? fromChange(f.stopgapChange) : undefined,
+          stopgap_reason: f.stopgapReason,
         }));
-        return ok(`${findings.length} findings for ${report.overview.account.name}.`, {
+        let pulse: Json | undefined;
+        try {
+          const pr = await checkPulse(backend, account_id, { days: 28 });
+          pulse = { headline: pr.headline, alarms: pr.alarms.map((a) => ({ id: a.id, kind: a.kind, severity: a.severity, title: a.title, detail: a.detail, next_steps: a.nextSteps })) };
+        } catch (e) {
+          pulse = { headline: `Pulse could not run: ${(e as Error).message}`, alarms: [] };
+        }
+        const alarmCount = Array.isArray(pulse.alarms) ? pulse.alarms.length : 0;
+        return ok(`${findings.length} findings for ${report.overview.account.name}${alarmCount ? `, plus ${alarmCount} Pulse alarm${alarmCount === 1 ? '' : 's'}` : ''}.`, {
           account: report.overview.account,
           period: report.overview.period,
           totals: report.overview.totals,
+          pulse_alarms: pulse,
           findings,
           protected_terms_not_negated: report.protectedTermsNotNegated,
           notes: report.notes,
@@ -333,9 +377,15 @@ export function createMcpServer(deps: ServerDeps): McpServer {
       guard(async () => {
         const kill = engine.killSwitchState();
         const accounts = await backend.listAccounts();
+        const live = [];
+        for (const a of accounts) {
+          const access = await engine.liveAccess(a.id);
+          live.push({ id: a.id, name: a.name, mode: a.mode, numbers: a.numbers, change_window: access.required ? (access.open ? { open: true, until: access.until, opened_by: access.openedBy } : { open: false }) : 'not needed' });
+        }
         return ok('Current guardrails.', {
           mode: backend.mode,
-          accounts: accounts.map((a) => ({ id: a.id, name: a.name, mode: a.mode })),
+          accounts: live,
+          live_accounts: `Live accounts are read-only until a person opens a change window (1 to ${engine.policy.live.maxWindowHours} hours) in the approval console by typing the account name. Every change still needs its own approval.`,
           scope: engine.scope,
           kill_switch: kill.on,
           kill_switch_forced_by_environment: kill.forcedByEnv,
@@ -360,7 +410,7 @@ export function createMcpServer(deps: ServerDeps): McpServer {
     ({ status, limit }) =>
       guard(async () => {
         const list = await engine.listProposals({ status: status as ProposalStatus | undefined, limit });
-        return ok(`${list.length} proposals.`, { proposals: list.map(proposalView) });
+        return ok(`${list.length} proposals.`, { proposals: list.map((p) => proposalView(p, deps.consoleUrl?.())) });
       }),
   );
 
@@ -371,7 +421,7 @@ export function createMcpServer(deps: ServerDeps): McpServer {
       guard(async () => {
         const p = await engine.getProposal(proposal_id.trim().toUpperCase());
         if (!p) return fail(`No proposal ${proposal_id}. Call list_proposals to see IDs.`);
-        return ok(`${p.id}: ${p.status.replace(/_/g, ' ')}.`, proposalView(p));
+        return ok(`${p.id}: ${p.status.replace(/_/g, ' ')}.`, proposalView(p, deps.consoleUrl?.()));
       }),
   );
 
@@ -388,6 +438,51 @@ export function createMcpServer(deps: ServerDeps): McpServer {
         const chain = engine.audit.verify();
         const entries = engine.audit.recent(limit, proposal_id?.trim().toUpperCase()).map((e) => ({ seq: e.seq, at: e.ts, type: e.type, actor: e.actor, proposal: e.proposalId, details: e.details, hash: e.hash.slice(0, 12) }));
         return ok(chain.ok ? `Audit chain intact (${chain.count} entries).` : `Audit chain BROKEN: ${chain.problem}`, { chain, entries });
+      }),
+  );
+
+  mcp.registerTool(
+    'check_pulse',
+    {
+      title: 'Pulse alarms',
+      description:
+        'Day-by-day alarms a monthly report misses: conversion tracking that stopped recording leads while clicks kept coming, enabled campaigns that stopped spending, overnight spend spikes and sudden lead drops. Each alarm says how unlikely the pattern is by chance and what to check. Changes nothing.',
+      inputSchema: { account_id: accountId, days: z.number().int().min(14).max(60).default(28).describe('How many days of history to read (14 to 60).') },
+      annotations: READ,
+    },
+    ({ account_id, days: d }) =>
+      guard(async () => {
+        const report = await checkPulse(backend, account_id, { days: d });
+        return ok(report.headline, report as unknown as Json);
+      }),
+  );
+
+  mcp.registerTool(
+    'verify_with_google',
+    {
+      title: "Check Google's own record",
+      description:
+        "Compares the platform's independent change history (Google Ads keeps 30 days) with the Campaign Ops approval log. Confirms every change made with the Campaign Ops credentials was approved and applied through Campaign Ops, flags any that were not, and lists edits made by people or other tools outside Campaign Ops. Changes nothing.",
+      inputSchema: { account_id: accountId, days: z.number().int().min(1).max(28).default(14).describe('How many days back to check (1 to 28).') },
+      annotations: READ,
+    },
+    ({ account_id, days: d }) =>
+      guard(async () => {
+        const w = await engine.witness(account_id, d);
+        return ok(w.headline, {
+          verdict: w.verdict,
+          source: w.source,
+          days: w.days,
+          robot_changes: w.robot,
+          matched_proposals: w.matches.map((m) => ({ proposal: m.proposalId, summary: m.summary, applied_at: m.appliedAt, recorded_by_google_at: m.googleAt, entries: m.events })),
+          missing_from_google: w.missing,
+          too_recent_to_check: w.pending,
+          unexplained_robot_changes: w.unexplained.map((e) => ({ at: e.at, what: e.summary, tool: e.client })),
+          setup_changes: w.setup,
+          outside_changes: w.outside.map((e) => ({ at: e.at, who: e.actor, tool: e.client, what: e.summary })),
+          outside_change_count: w.outsideCount,
+          note: w.note,
+        });
       }),
   );
 
@@ -409,8 +504,12 @@ export function createMcpServer(deps: ServerDeps): McpServer {
         guard(async () => {
           const p = await engine.propose({ accountId: account_id, change: toChange(change), reason, requestedBy: agentLabel() });
           const failed = p.checks.filter((c) => c.status === 'fail');
-          const head = p.status === 'blocked' ? `${p.id} BLOCKED: ${failed.map((c) => c.detail ?? c.label).join(' ')}` : `${p.id} is waiting for human approval: ${p.summary}`;
-          return ok(head, proposalView(p));
+          const link = approveLink(p, deps.consoleUrl?.());
+          const head =
+            p.status === 'blocked'
+              ? `${p.id} BLOCKED: ${failed.map((c) => c.detail ?? c.label).join(' ')}`
+              : `${p.id} is waiting for human approval: ${p.summary}${link ? ` Approve or reject it here: ${link}` : ''}`;
+          return ok(head, proposalView(p, deps.consoleUrl?.()));
         }),
     );
 
@@ -426,8 +525,9 @@ export function createMcpServer(deps: ServerDeps): McpServer {
         guard(async () => {
           const p = await engine.requestRollback(proposal_id.trim().toUpperCase(), { reason, requestedBy: agentLabel() });
           const failed = p.checks.filter((c) => c.status === 'fail');
-          const head = p.status === 'blocked' ? `Undo ${p.id} BLOCKED: ${failed.map((c) => c.detail ?? c.label).join(' ')}` : `Undo ${p.id} is waiting for human approval.`;
-          return ok(head, proposalView(p));
+          const link = approveLink(p, deps.consoleUrl?.());
+          const head = p.status === 'blocked' ? `Undo ${p.id} BLOCKED: ${failed.map((c) => c.detail ?? c.label).join(' ')}` : `Undo ${p.id} is waiting for human approval.${link ? ` Approve or reject it here: ${link}` : ''}`;
+          return ok(head, proposalView(p, deps.consoleUrl?.()));
         }),
     );
   }
@@ -500,8 +600,14 @@ export function createMcpServer(deps: ServerDeps): McpServer {
           }
 
           if (p.status === 'pending_approval') {
-            const where = deps.consoleUrl?.() ? ` in the approval console (${deps.consoleUrl()})` : ' in the approval console (run "npm run console" on the computer running Campaign Ops)';
-            return ok(`${id} is waiting for human approval.`, { status: 'awaiting_approval', next_step: `Ask the person to approve ${id}${where}. Then call apply_change again, or call it with wait_seconds to wait.`, proposal: proposalView(p) });
+            const link = approveLink(p, deps.consoleUrl?.());
+            const where = link ? ` here: ${link}` : ' in the approval console (run "npm run console" on the computer running Campaign Ops)';
+            return ok(`${id} is waiting for human approval.${link ? ` Approve it here: ${link}` : ''}`, {
+              status: 'awaiting_approval',
+              approve_link: link,
+              next_step: `Ask the person to approve ${id}${where}. Then call apply_change again, or call it with wait_seconds to wait.`,
+              proposal: proposalView(p, deps.consoleUrl?.()),
+            });
           }
           if (p.status === 'rejected') return ok(`${id} was rejected by a person.`, { status: 'rejected', proposal: proposalView(p) });
 

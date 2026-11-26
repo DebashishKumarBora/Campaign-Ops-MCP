@@ -44,10 +44,21 @@ export class ProposalStore {
   }
 }
 
-interface ControlFile {
+/** A time-boxed permission to change one live (non-test) account. */
+export interface ChangeWindow {
+  accountId: string;
+  until: string;
+  openedAt: string;
+  openedBy: string;
+  hours: number;
+}
+
+export interface ControlFile {
   killSwitch: boolean;
   updatedAt?: string;
   updatedBy?: string;
+  /** Open change windows for live accounts, keyed by account ID. */
+  windows?: Record<string, ChangeWindow>;
 }
 
 /** Human-only controls. The AI has no tool that writes here. */

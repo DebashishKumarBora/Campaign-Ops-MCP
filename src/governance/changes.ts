@@ -36,6 +36,7 @@ const TYPE_LABELS: Record<Change['type'], string> = {
   add_negative_keywords: 'Negative keywords',
   remove_negative_keywords: 'Remove negative keywords',
   update_ad_text: 'Ad copy update',
+  set_ad_status: 'Ad status change',
 };
 
 export function typeLabel(change: Change): string {
@@ -53,6 +54,8 @@ export function targetKeyOf(change: Change): string {
       return `campaign:${change.campaignId}:negatives`;
     case 'update_ad_text':
       return `ad:${change.adId}:text`;
+    case 'set_ad_status':
+      return `ad:${change.adId}:status`;
   }
 }
 
@@ -95,6 +98,11 @@ export async function readTargetState(backend: AdsBackend, accountId: string, ch
       if (!ad) throw new UserError(`No ad ${change.adId} in account ${accountId}. Call get_ads for valid ad IDs.`);
       return { headlines: [...ad.headlines], descriptions: [...ad.descriptions] };
     }
+    case 'set_ad_status': {
+      const ad = await backend.getAd(accountId, change.adId);
+      if (!ad) throw new UserError(`No ad ${change.adId} in account ${accountId}. Call get_ads for valid ad IDs.`);
+      return { status: ad.status };
+    }
   }
 }
 
@@ -114,6 +122,8 @@ export function expectedAfter(change: Change): unknown {
       return { present: [] };
     case 'update_ad_text':
       return { headlines: [...change.headlines], descriptions: [...change.descriptions] };
+    case 'set_ad_status':
+      return { status: change.newStatus };
   }
 }
 
@@ -132,6 +142,8 @@ export function inverseOf(change: Change, before: unknown): Change {
       const b = before as { headlines: string[]; descriptions: string[] };
       return { type: 'update_ad_text', adId: change.adId, headlines: b.headlines, descriptions: b.descriptions };
     }
+    case 'set_ad_status':
+      return { type: 'set_ad_status', adId: change.adId, newStatus: (before as { status: Campaign['status'] }).status };
   }
 }
 
@@ -157,6 +169,8 @@ export function normalizeChange(change: Change): Change {
     }
     case 'update_ad_text':
       return { ...change, headlines: change.headlines.map((h) => h.trim()), descriptions: change.descriptions.map((d) => d.trim()) };
+    case 'set_ad_status':
+      return { ...change };
   }
 }
 
@@ -395,6 +409,63 @@ export async function evaluate(ctx: EvalContext, change: Change): Promise<Evalua
         checks,
         risk: 'medium',
         fairHousing: fh,
+      };
+    }
+
+    case 'set_ad_status': {
+      const ad = (await ctx.backend.getAd(ctx.accountId, change.adId))!;
+      const campaign = await ctx.backend.getCampaign(ctx.accountId, ad.campaignId);
+      const old = (before as { status: Campaign['status'] }).status;
+      const pausing = change.newStatus === 'PAUSED';
+      const where = campaign?.name ?? ad.campaignId;
+      if (old === change.newStatus) checks.push({ id: 'no_op', label: 'Makes a change', status: 'fail', detail: `The ad is already ${old.toLowerCase()}.` });
+
+      if (pausing) {
+        checks.push(P.status.allowPause ? { id: 'status_allowed', label: 'Pausing allowed by policy', status: 'pass' } : { id: 'status_allowed', label: 'Pausing allowed by policy', status: 'fail', detail: 'Policy does not allow pausing.' });
+      } else {
+        checks.push(P.status.allowEnable ? { id: 'status_allowed', label: 'Enabling allowed by policy', status: 'pass' } : { id: 'status_allowed', label: 'Enabling allowed by policy', status: 'fail', detail: 'Policy does not allow enabling.' });
+      }
+
+      // Ads in the same ad group that keep serving if this one is paused.
+      const siblings = (await ctx.backend.listAds(ctx.accountId, ad.campaignId)).filter(
+        (x) => x.id !== ad.id && (ad.adGroupId ? x.adGroupId === ad.adGroupId : x.adGroupName === ad.adGroupName),
+      );
+      const othersLive = siblings.filter((x) => x.status === 'ENABLED').length;
+      let lastAd = false;
+      if (pausing) {
+        lastAd = othersLive === 0 && old === 'ENABLED';
+        checks.push(
+          lastAd
+            ? { id: 'last_ad', label: 'Ad group keeps serving', status: 'warn', detail: `This is the only active ad in its ad group (${ad.adGroupName || 'ad group'}), so the ad group stops showing ads until another ad is added or enabled.` }
+            : { id: 'last_ad', label: 'Ad group keeps serving', status: 'pass', detail: `${othersLive} other active ad${othersLive === 1 ? '' : 's'} in the ad group keep${othersLive === 1 ? 's' : ''} running.` },
+        );
+      }
+
+      // Re-enabling is screened like new copy: a flagged ad must be fixed before it runs again.
+      const fh = lintAd(ad.headlines, ad.descriptions);
+      if (!pausing) {
+        if (fh.status === 'block') {
+          checks.push({ id: 'fair_housing_copy', label: 'Fair Housing screening', status: 'fail', detail: `This ad has Fair Housing violation risks: ${fh.findings.filter((f) => f.severity === 'block').map((f) => `${f.field}: "${f.match}" (${categoryLabel(f.category)})`).join('; ')}. Fix the copy with update_ad_text before enabling it.` });
+        } else if (fh.status === 'warn') {
+          checks.push({ id: 'fair_housing_copy', label: 'Fair Housing screening', status: 'warn', detail: fh.findings.map((f) => `${f.field}: "${f.match}" (${categoryLabel(f.category)}). ${f.suggestion}`).join(' ') });
+        } else {
+          checks.push({ id: 'fair_housing_copy', label: 'Fair Housing screening', status: 'pass', detail: 'No risk patterns found in this ad.' });
+        }
+      }
+
+      return {
+        typeLabel: typeLabel(change),
+        targetKey: targetKeyOf(change),
+        targetLabel: `${where} › ad ${ad.id}`,
+        before,
+        after,
+        summary: pausing
+          ? `Pause ad ${ad.id} in ${where}${lastAd ? ' (the only active ad in its ad group)' : othersLive ? ` (${othersLive} other active ad${othersLive === 1 ? '' : 's'} keep running)` : ''}.`
+          : `Enable ad ${ad.id} in ${where}.`,
+        diff: [{ field: `Ad ${ad.id} status`, before: old === 'ENABLED' ? 'Enabled' : 'Paused', after: pausing ? 'Paused' : 'Enabled' }],
+        checks,
+        risk: ctx.isRollback ? 'low' : pausing ? (lastAd ? 'high' : 'low') : 'medium',
+        fairHousing: !pausing ? fh : undefined,
       };
     }
   }

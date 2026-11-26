@@ -13,10 +13,15 @@ export interface Account {
   currency: string;
   timezone: string;
   mode: BackendMode;
+  /**
+   * Where performance numbers come from: synthetic (sandbox), simulated
+   * (Google Ads test accounts never serve ads) or live (real numbers from Google).
+   */
+  numbers?: 'synthetic' | 'simulated' | 'live';
 }
 
 export type CampaignStatus = 'ENABLED' | 'PAUSED';
-export type ChannelType = 'SEARCH' | 'DISPLAY' | 'PERFORMANCE_MAX';
+export type ChannelType = 'SEARCH' | 'DISPLAY' | 'PERFORMANCE_MAX' | 'VIDEO' | 'DEMAND_GEN' | 'SHOPPING' | 'OTHER';
 
 export interface Campaign {
   id: string;
@@ -57,6 +62,8 @@ export interface NegativeKeyword {
 export interface Ad {
   id: string;
   campaignId: string;
+  /** Set by backends that know the ad group's ID (Google Ads). */
+  adGroupId?: string;
   adGroupName: string;
   status: CampaignStatus;
   headlines: string[];
@@ -64,13 +71,38 @@ export interface Ad {
   finalUrl: string;
 }
 
-/** Every change the system can make. The first four are open to the AI; the last exists for rollbacks. */
+/** Every change the system can make. All but the last are open to the AI; remove_negative_keywords exists for rollbacks. */
 export type Change =
   | { type: 'set_campaign_budget'; campaignId: string; newDailyBudget: number }
   | { type: 'set_campaign_status'; campaignId: string; newStatus: CampaignStatus }
   | { type: 'add_negative_keywords'; campaignId: string; keywords: NegativeKeyword[] }
   | { type: 'update_ad_text'; adId: string; headlines: string[]; descriptions: string[] }
+  | { type: 'set_ad_status'; adId: string; newStatus: CampaignStatus }
   | { type: 'remove_negative_keywords'; campaignId: string; keywords: NegativeKeyword[] };
+
+/**
+ * One entry from the platform's own change history (Google Ads keeps 30 days).
+ * Used to check Campaign Ops against an independent record.
+ */
+export interface ChangeEvent {
+  /** When the platform recorded it, ISO 8601 in UTC. */
+  at: string;
+  /** Who made it, as the platform reports it (an email address for people and for the robot). */
+  actor: string;
+  /** True when it was made with the Campaign Ops credentials. */
+  byRobot: boolean;
+  /** How it was made, for example "Google Ads API" or "Google Ads web". */
+  client: string;
+  operation: 'CREATE' | 'UPDATE' | 'REMOVE';
+  /** For example CAMPAIGN_BUDGET, CAMPAIGN, CAMPAIGN_CRITERION, AD, AD_GROUP_AD. */
+  resourceType: string;
+  resourceName: string;
+  campaignId?: string;
+  adId?: string;
+  fields: string[];
+  /** Plain-English description, for example "Daily budget $25.00 to $30.00". */
+  summary: string;
+}
 
 export type ChangeType = Change['type'];
 
@@ -195,6 +227,8 @@ export interface Policy {
     maxDescriptions: number;
   };
   status: { allowPause: boolean; allowEnable: boolean };
+  /** Live (non-test) accounts: changes stay off until a person opens a change window in the console. */
+  live: { maxWindowHours: number };
 }
 
 /** An error whose message is safe and useful to show to the AI or the person. */

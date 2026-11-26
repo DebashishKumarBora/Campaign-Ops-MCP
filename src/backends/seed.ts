@@ -1,4 +1,4 @@
-import type { Account, Ad, Campaign, DailyMetric, NegativeKeyword, SearchTermRow } from '../types.js';
+import type { Account, Ad, Campaign, ChangeEvent, DailyMetric, NegativeKeyword, SearchTermRow } from '../types.js';
 import { addDays, isoDay, round2 } from '../util/format.js';
 
 /**
@@ -11,6 +11,10 @@ import { addDays, isoDay, round2 } from '../util/format.js';
  *   - An Ashgrove Commons ad contains Fair Housing problems.
  *   - Two zero-conversion search terms relate to protected groups, so a naive
  *     optimizer would wrongly exclude them.
+ *   - Juniper Yard Brand records no leads for the last 3 days while clicks keep
+ *     coming, the signature of broken conversion tracking (Pulse finds it).
+ *   - Two people edited the account outside Campaign Ops in the last week, so
+ *     the witness check has outside changes to report.
  */
 
 export interface SandboxState {
@@ -24,6 +28,10 @@ export interface SandboxState {
   searchTermDays: number;
   negatives: Record<string, NegativeKeyword[]>;
   ads: Ad[];
+  /** The account's own change history, newest last. Older sandbox files have none. */
+  changeHistory?: ChangeEvent[];
+  /** When the change history begins. Older sandbox files start theirs when first opened by this version. */
+  historyStartedAt?: string;
 }
 
 export const SANDBOX_ACCOUNT_ID = '123-456-7890';
@@ -161,6 +169,40 @@ export const NEGATIVES: Record<string, NegativeKeyword[]> = {
   'c-302': [],
 };
 
+/** Days at the end of the period with broken conversion tracking on Juniper Yard Brand. */
+export const OUTAGE_DAYS = 3;
+
+/** Two edits made by people outside Campaign Ops, so the witness check has something to report. */
+export function seedChangeHistory(endDate: string, accountId: string): ChangeEvent[] {
+  const prefix = `customers/${accountId.replace(/\D/g, '')}`;
+  return [
+    {
+      at: `${addDays(endDate, -5)}T16:15:00.000Z`,
+      actor: 'sam@demoproperty.example',
+      byRobot: false,
+      client: 'Google Ads Editor',
+      operation: 'CREATE',
+      resourceType: 'CAMPAIGN_CRITERION',
+      resourceName: `${prefix}/campaignCriteria/c-102~n-1`,
+      campaignId: 'c-102',
+      fields: ['keyword.text', 'keyword.match_type', 'negative'],
+      summary: 'Added negative keyword "craigslist" (phrase) to Juniper Yard | Search | Generic',
+    },
+    {
+      at: `${addDays(endDate, -2)}T22:42:00.000Z`,
+      actor: 'jordan@demoproperty.example',
+      byRobot: false,
+      client: 'Google Ads web',
+      operation: 'UPDATE',
+      resourceType: 'CAMPAIGN_BUDGET',
+      resourceName: `${prefix}/campaignBudgets/c-101`,
+      campaignId: 'c-101',
+      fields: ['amount_micros'],
+      summary: 'Daily budget of Juniper Yard | Search | Brand changed from $25.00 to $30.00',
+    },
+  ];
+}
+
 export function defaultEndDate(now = new Date()): string {
   const d = new Date(now.getTime());
   d.setUTCDate(d.getUTCDate() - 1);
@@ -208,6 +250,8 @@ export function buildSandboxState(opts: { endDate?: string; seed?: number; now?:
     }
     metrics[s.id] = rows;
   }
+  // Planted: conversion tracking on Juniper Yard Brand stops recording leads for the last 3 days.
+  for (const row of metrics['c-101'].slice(-OUTAGE_DAYS)) row.conversions = 0;
 
   const searchTerms: SearchTermRow[] = [];
   for (const [campaignId, rows] of Object.entries(TERMS)) {
@@ -228,5 +272,6 @@ export function buildSandboxState(opts: { endDate?: string; seed?: number; now?:
     searchTermDays: SANDBOX_DAYS,
     negatives: structuredClone(NEGATIVES),
     ads: structuredClone(ADS),
+    changeHistory: seedChangeHistory(endDate, account.id),
   };
 }

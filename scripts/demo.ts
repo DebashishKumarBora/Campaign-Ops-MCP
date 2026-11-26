@@ -11,6 +11,7 @@ import path from 'node:path';
 import { SandboxBackend } from '../src/backends/sandbox.js';
 import { Engine } from '../src/governance/engine.js';
 import { runDiagnostics } from '../src/governance/diagnostics.js';
+import { checkPulse } from '../src/governance/pulse.js';
 import { DEFAULT_POLICY } from '../src/config.js';
 import type { Change, Proposal } from '../src/types.js';
 
@@ -135,6 +136,20 @@ console.log(`   ${yellow(refused.status.toUpperCase())} ${refused.message}`);
 await engine.setKillSwitch(false, PERSON);
 const resumed = await engine.apply(pause.id, { actor: AGENT });
 console.log(`   ${green(resumed.status.toUpperCase())} after a person resumed changes: ${resumed.message}`);
+
+heading('Pulse catches what a monthly report misses');
+const pulse = await checkPulse(backend, ACCOUNT, { days: 28 });
+for (const a of pulse.alarms) {
+  console.log(`   ${red('ALARM')} ${a.title}`);
+  console.log(dim(`     ${a.detail}`));
+}
+
+heading("The approval log is checked against the account's own record");
+const witness = await engine.witness(ACCOUNT, 14);
+console.log(`   ${witness.verdict === 'clean' ? green('✓') : red('✕')} ${witness.headline}`);
+await backend.mutate(ACCOUNT, { type: 'set_campaign_status', campaignId: 'c-101', newStatus: 'PAUSED' }, { validateOnly: false });
+const caught = await engine.witness(ACCOUNT, 14);
+console.log(`   ${red('✕')} After a change made with the robot's key outside Campaign Ops: ${caught.headline}`);
 
 heading('The audit log is tamper-evident');
 const ok = engine.audit.verify();

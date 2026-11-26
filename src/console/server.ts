@@ -6,6 +6,7 @@ import type { Engine } from '../governance/engine.js';
 import type { AdsBackend } from '../backends/backend.js';
 import { UserError } from '../types.js';
 import { safeEqual } from '../util/hash.js';
+import { checkPulse } from '../governance/pulse.js';
 
 /**
  * The human approval console: a small web page on 127.0.0.1.
@@ -18,6 +19,8 @@ import { safeEqual } from '../util/hash.js';
  *  - POST requests must be JSON and same-origin (blocks cross-site form posts).
  *  - Strict Content-Security-Policy and frame-ancestors 'none' (blocks injected
  *    scripts and clickjacking). Text from the AI is escaped before display.
+ *  - Change windows for live accounts can only be opened here, by a person who
+ *    types the account name. No MCP tool can open one.
  */
 
 export interface ConsoleOptions {
@@ -40,10 +43,12 @@ const STATIC: Record<string, { file: string; type: string }> = {
   '/': { file: 'index.html', type: 'text/html; charset=utf-8' },
   '/app.js': { file: 'app.js', type: 'text/javascript; charset=utf-8' },
   '/app.css': { file: 'app.css', type: 'text/css; charset=utf-8' },
+  '/fonts/source-serif-4-roman.woff2': { file: 'fonts/source-serif-4-roman.woff2', type: 'font/woff2' },
+  '/fonts/source-serif-4-italic.woff2': { file: 'fonts/source-serif-4-italic.woff2', type: 'font/woff2' },
 };
 
 const SECURITY_HEADERS: Record<string, string> = {
-  'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
   'X-Frame-Options': 'DENY',
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
@@ -83,9 +88,37 @@ async function readBody(req: http.IncomingMessage, limit = 10_000): Promise<Reco
   });
 }
 
+/** How long Pulse and witness results are reused. Both read the ad platform, which has daily limits. */
+const INSIGHT_TTL_MS = 5 * 60_000;
+/** "Check again" is ignored for results younger than this, so repeated clicks cannot burn through the daily limit. */
+const INSIGHT_MIN_REFRESH_MS = 20_000;
+
 export function startConsole(opts: ConsoleOptions): Promise<ConsoleHandle> {
   const { engine, backend } = opts;
   let actualPort = opts.port;
+  const insights = new Map<string, { at: number; sig: string; data: Record<string, unknown> }>();
+
+  /** Changes whenever a change is applied, so results never hide a fresh change. */
+  const appliedSignature = (accountId: string): string => {
+    const applied = engine.store.list().filter((p) => p.accountId === accountId && p.appliedAt);
+    return `${applied.length}:${applied.map((p) => p.appliedAt).sort().pop() ?? ''}`;
+  };
+
+  async function insightsFor(accountId: string, refresh: boolean): Promise<Record<string, unknown>> {
+    const account = await backend.getAccount(accountId);
+    if (!account) throw new UserError(`Unknown account ${accountId}.`);
+    const now = Date.now();
+    const sig = appliedSignature(account.id);
+    const hit = insights.get(account.id);
+    if (hit && hit.sig === sig && (now - hit.at < (refresh ? INSIGHT_MIN_REFRESH_MS : INSIGHT_TTL_MS))) return { ...hit.data, cached: true };
+    const [pulse, witness] = await Promise.all([
+      checkPulse(backend, account.id, { days: 28 }).catch((e: Error) => ({ error: e.message })),
+      engine.witness(account.id, 14).catch((e: Error) => ({ error: e.message })),
+    ]);
+    const data = { accountId: account.id, checkedAt: new Date(now).toISOString(), pulse, witness };
+    insights.set(account.id, { at: now, sig, data });
+    return { ...data, cached: false };
+  }
 
   const allowedHosts = () => new Set([`127.0.0.1:${actualPort}`, `localhost:${actualPort}`]);
   const allowedOrigins = () => new Set([`http://127.0.0.1:${actualPort}`, `http://localhost:${actualPort}`]);
@@ -111,8 +144,16 @@ export function startConsole(opts: ConsoleOptions): Promise<ConsoleHandle> {
       const token = req.headers['x-console-token'];
       if (typeof token !== 'string' || !safeEqual(token, opts.token)) return send(res, 401, { error: 'Missing or wrong console key.' });
 
+      if (req.method === 'GET' && pathname === '/api/insights') {
+        const id = url.searchParams.get('account') ?? '';
+        if (!/^[A-Za-z0-9-]{3,40}$/.test(id)) return send(res, 400, { error: 'Pass ?account= with an account ID.' });
+        return send(res, 200, await insightsFor(id, url.searchParams.get('refresh') === '1'));
+      }
+
       if (req.method === 'GET' && pathname === '/api/state') {
-        const accounts = await backend.listAccounts();
+        const listed = await backend.listAccounts();
+        const accounts = [];
+        for (const a of listed) accounts.push({ ...a, access: await engine.liveAccess(a.id) });
         const proposals = await engine.listProposals({ limit: 80 });
         const chain = engine.audit.verify();
         const recent = engine.audit.recent(14);
@@ -162,6 +203,17 @@ export function startConsole(opts: ConsoleOptions): Promise<ConsoleHandle> {
               ? `Undo blocked: ${result.rollback.checks.filter((c) => c.status === 'fail').map((c) => c.detail ?? c.label).join(' ')}`
               : result.outcome?.message ?? 'Undo requested.',
           });
+        }
+
+        const win = /^\/api\/accounts\/([A-Za-z0-9-]{3,40})\/window(\/close)?$/.exec(pathname);
+        if (win) {
+          const [, accountId, close] = win;
+          if (close) {
+            await engine.closeChangeWindow(accountId, who);
+            return send(res, 200, { ok: true, access: await engine.liveAccess(accountId) });
+          }
+          const window = await engine.openChangeWindow(accountId, { hours: Number(body.hours), confirmName: typeof body.confirm === 'string' ? body.confirm : '', by: who });
+          return send(res, 200, { ok: true, window, access: await engine.liveAccess(accountId) });
         }
 
         if (pathname === '/api/kill-switch') {

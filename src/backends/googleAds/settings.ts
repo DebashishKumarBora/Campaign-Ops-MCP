@@ -22,6 +22,12 @@ export interface GoogleAdsAccountSetting {
   timezone: string;
   /** What Google reported when the account was checked. Re-checked before every change. */
   testAccount: boolean;
+  /**
+   * The account the robot signs in through for this account (login-customer-id).
+   * Defaults to the manager account. Set to the account itself when the robot
+   * was added to it directly.
+   */
+  loginCustomerId?: string;
 }
 
 export interface GoogleAdsSettings {
@@ -82,6 +88,7 @@ export function loadSettings(env: Env = process.env): GoogleAdsSettings | null {
             currency: String(a.currency || 'USD'),
             timezone: String(a.timezone || 'America/Chicago'),
             testAccount: Boolean(a.testAccount),
+            ...(typeof a.loginCustomerId === 'string' && isCustomerId(a.loginCustomerId) ? { loginCustomerId: dashed(a.loginCustomerId) } : {}),
           }))
       : [],
     updatedAt: raw.updatedAt,
@@ -94,7 +101,7 @@ export function saveSettings(settings: GoogleAdsSettings, env: Env = process.env
     $note: 'Written by npm run gads:setup. Not secret. The secret is the key file it points to. Never share or upload that file.',
     ...settings,
     managerId: dashed(settings.managerId),
-    accounts: settings.accounts.map((a) => ({ ...a, id: dashed(a.id) })),
+    accounts: settings.accounts.map((a) => ({ ...a, id: dashed(a.id), ...(a.loginCustomerId ? { loginCustomerId: dashed(a.loginCustomerId) } : {}) })),
     updatedAt: new Date().toISOString(),
   });
   return file;

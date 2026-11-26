@@ -18,7 +18,10 @@ export type AuditType =
   | 'expired'
   | 'kill_switch_on'
   | 'kill_switch_off'
-  | 'tamper_detected';
+  | 'tamper_detected'
+  | 'change_window_opened'
+  | 'change_window_closed'
+  | 'setup_changes';
 
 export interface AuditEntry {
   seq: number;

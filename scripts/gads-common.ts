@@ -84,17 +84,18 @@ export interface ClientAccount {
   status: string;
 }
 
-/**
- * Steps 1 to 4: key file, robot login, robot added to the manager account,
- * and Google's answer to "is this a test account?". Saves the manager ID.
- */
-export async function connect(args: Args): Promise<Connection> {
+export interface Robot {
+  client: GoogleAdsClient;
+  email: string;
+  keyFile: string;
+  apiVersion: string;
+  saved: GoogleAdsSettings | null;
+}
+
+/** Steps 1 and 2: the key file and the robot login. */
+export async function robotLogin(loginCustomerId?: string): Promise<Robot> {
   loadConfig(); // reads .env the same way the server does
   const saved = loadSettings();
-  const managerId = args.managerId ?? (saved?.managerId || (process.env.GOOGLE_ADS_MANAGER_ID ? dashed(process.env.GOOGLE_ADS_MANAGER_ID) : ''));
-  if (!isCustomerId(managerId)) {
-    throw new Stop('I need your test manager account number (the 10 digits at the top of Google Ads).', ['Run it like this: npm run gads:check -- 724-800-0350']);
-  }
 
   // 1. Key file
   const keyFile = saved?.keyFile && saved.keyFile !== defaultKeyFile() && !process.env.GOOGLE_ADS_KEY_FILE ? saved.keyFile : defaultKeyFile();
@@ -120,10 +121,27 @@ export async function connect(args: Args): Promise<Connection> {
   const client = new GoogleAdsClient({
     auth,
     apiVersion,
-    loginCustomerId: managerId,
+    loginCustomerId: loginCustomerId || undefined,
     developerToken: process.env.GOOGLE_ADS_DEVELOPER_TOKEN?.trim() || undefined,
     baseUrl: process.env.GOOGLE_ADS_API_BASE_URL?.trim() || undefined, // tests only
   });
+  return { client, email: key.client_email, keyFile, apiVersion, saved };
+}
+
+/**
+ * Steps 1 to 4: key file, robot login, robot added to the manager account,
+ * and Google's answer to "is this a test account?". Saves the manager ID.
+ */
+export async function connect(args: Args): Promise<Connection> {
+  loadConfig(); // reads .env the same way the server does
+  const savedFirst = loadSettings();
+  const managerId = args.managerId ?? (savedFirst?.managerId || (process.env.GOOGLE_ADS_MANAGER_ID ? dashed(process.env.GOOGLE_ADS_MANAGER_ID) : ''));
+  if (!isCustomerId(managerId)) {
+    throw new Stop('I need your test manager account number (the 10 digits at the top of Google Ads).', ['Run it like this: npm run gads:check -- 724-800-0350']);
+  }
+
+  const { client, email, keyFile, apiVersion, saved } = await robotLogin(managerId);
+  const key = { client_email: email };
 
   // 3. Can the robot see the manager account?
   let visible: string[];
@@ -135,7 +153,7 @@ export async function connect(args: Args): Promise<Connection> {
   if (!visible.includes(digits(managerId))) {
     throw new Stop(`The robot cannot see account ${managerId} yet.`, [
       'In Google Ads, open the manager account, then Admin, then Access and security, then Users.',
-      `Click +, paste ${key.client_email}, choose Standard access and add it.`,
+      `Click +, paste ${key.client_email}, choose Admin access and add it. Setup needs Admin to create the test ad account.`,
       visible.length ? `(The robot can currently see: ${visible.map(dashed).join(', ')})` : '(The robot cannot see any Google Ads account right now.)',
     ]);
   }

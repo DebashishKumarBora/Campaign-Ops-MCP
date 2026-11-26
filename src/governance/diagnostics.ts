@@ -4,6 +4,9 @@ import { UserError } from '../types.js';
 import { categoryLabel, lintAd, protectedTermIn } from './fairHousing.js';
 import { money, round2, share } from '../util/format.js';
 
+export const GOOGLE_ADS_LIVE_NOTE =
+  'Live Google Ads account: these are real numbers from Google. Changes stay off until a person opens a time-limited change window in the approval console, and every change still needs approval.';
+
 export const GOOGLE_ADS_TEST_NOTE =
   'Google Ads test account: campaigns, budgets, keywords and ads are real, and every change goes to Google. Performance numbers (spend, clicks, leads, search terms) are simulated, because test accounts never show ads.';
 
@@ -48,6 +51,9 @@ export interface Finding {
   suggestedChange?: Change;
   suggestedReason?: string;
   needsCopywriting?: { adId: string; currentHeadlines: string[]; currentDescriptions: string[]; flagged: string[] };
+  /** A quick, reversible way to stop the risk while the proper fix is prepared (for example pausing a flagged ad). */
+  stopgapChange?: Change;
+  stopgapReason?: string;
 }
 
 export interface DiagnosticsReport {
@@ -136,6 +142,8 @@ export async function runDiagnostics(backend: AdsBackend, policy: Policy, accoun
       title: `Fair Housing ${report.status === 'block' ? 'risk' : 'review'} in ad ${ad.id} (${campaign?.name ?? ad.campaignId})`,
       detail: `${flagged.join('; ')}. Write replacement copy that describes the home and amenities, check it with check_ad_copy, then propose update_ad_text with the full list of headlines and descriptions.`,
       needsCopywriting: { adId: ad.id, currentHeadlines: ad.headlines, currentDescriptions: ad.descriptions, flagged },
+      stopgapChange: report.status === 'block' ? { type: 'set_ad_status', adId: ad.id, newStatus: 'PAUSED' } : undefined,
+      stopgapReason: report.status === 'block' ? `Pause ad ${ad.id} right away so the flagged copy stops showing while compliant copy is written and approved.` : undefined,
     });
   }
 
@@ -226,5 +234,6 @@ export async function runDiagnostics(backend: AdsBackend, policy: Policy, accoun
   ];
   if (overview.account.mode === 'sandbox') notes.unshift('Sandbox account: all data is synthetic.');
   if (overview.account.mode === 'google_ads_test') notes.unshift(GOOGLE_ADS_TEST_NOTE);
+  if (overview.account.mode === 'google_ads') notes.unshift(GOOGLE_ADS_LIVE_NOTE);
   return { overview, findings, protectedTermsNotNegated: protectedTerms, notes };
 }

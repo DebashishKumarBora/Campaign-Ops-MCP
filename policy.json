@@ -31,5 +31,9 @@
   "status": {
     "allowPause": true,
     "allowEnable": true
+  },
+  "live": {
+    "$comment": "Live (non-test) Google Ads accounts are read-only until a person opens a change window in the approval console. This is the longest window allowed.",
+    "maxWindowHours": 8
   }
 }

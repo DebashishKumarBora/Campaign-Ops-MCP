@@ -1,11 +1,12 @@
 import path from 'node:path';
 import type { AdsBackend } from '../backends/backend.js';
-import type { ApprovalChannel, Change, Check, Policy, Proposal, ProposalStatus, Scope } from '../types.js';
+import type { Account, ApprovalChannel, Change, Check, Policy, Proposal, ProposalStatus, Scope } from '../types.js';
 import { UserError } from '../types.js';
 import { AuditLog, type AuditType } from './audit.js';
-import { ControlStore, ProposalStore } from './stores.js';
+import { ControlStore, ProposalStore, type ChangeWindow } from './stores.js';
 import { evaluate, inverseOf, normalizeChange, readTargetState } from './changes.js';
 import { DirLock } from '../util/fsx.js';
+import { witnessCheck, type WitnessReport } from './witness.js';
 import { canonical, sameState, sha256 } from '../util/hash.js';
 import { cleanText } from '../util/format.js';
 
@@ -45,6 +46,19 @@ export interface ProposeInput {
 }
 
 const OPEN: ProposalStatus[] = ['pending_approval', 'approved'];
+
+/** Whether an account needs a change window, and whether one is open. */
+export interface LiveAccess {
+  required: boolean;
+  open: boolean;
+  until?: string;
+  openedBy?: string;
+  openedAt?: string;
+  hours?: number;
+}
+
+const sameName = (a: string, b: string) => a.trim().replace(/\s+/g, ' ').toLowerCase() === b.trim().replace(/\s+/g, ' ').toLowerCase();
+const utcLabel = (iso: string) => `${iso.slice(0, 16).replace('T', ' ')} UTC`;
 
 /**
  * The governance engine. Every change, including an undo, follows one path:
@@ -102,8 +116,72 @@ export class Engine {
     await this.lock.run(() => {
       const current = this.control.load();
       if (current.killSwitch === on) return;
-      this.control.save({ killSwitch: on, updatedAt: this.iso(), updatedBy: by });
+      this.control.save({ ...current, killSwitch: on, updatedAt: this.iso(), updatedBy: by });
       this.log(on ? 'kill_switch_on' : 'kill_switch_off', by, undefined, {});
+    });
+  }
+
+  // ---------- change windows for live accounts ----------
+
+  /** The open change window for an account, or undefined if none is open right now. */
+  private activeWindow(accountId: string): ChangeWindow | undefined {
+    const w = this.control.load().windows?.[accountId];
+    return w && Date.parse(w.until) > this.now() ? w : undefined;
+  }
+
+  private liveFor(account: Account): LiveAccess {
+    if (account.mode !== 'google_ads') return { required: false, open: true };
+    const w = this.activeWindow(account.id);
+    return w ? { required: true, open: true, until: w.until, openedBy: w.openedBy, openedAt: w.openedAt, hours: w.hours } : { required: true, open: false };
+  }
+
+  /** Live (non-test) accounts are read-only until a person opens a change window. */
+  async liveAccess(accountId: string): Promise<LiveAccess> {
+    const account = await this.opts.backend.getAccount(accountId);
+    if (!account) throw new UserError(`Unknown account ${accountId}.`);
+    return this.liveFor(account);
+  }
+
+  /** Every change window that is open right now. */
+  openWindows(): ChangeWindow[] {
+    const now = this.now();
+    return Object.values(this.control.load().windows ?? {}).filter((w) => Date.parse(w.until) > now);
+  }
+
+  /**
+   * Human only: allows changes to one live account for a few hours. The person
+   * must type the account's name, the way you confirm a dangerous action.
+   * Every change still needs its own approval.
+   */
+  async openChangeWindow(accountId: string, input: { hours: number; confirmName: string; by: string }): Promise<ChangeWindow> {
+    const account = await this.opts.backend.getAccount(accountId);
+    if (!account) throw new UserError(`Unknown account ${accountId}.`);
+    if (account.mode !== 'google_ads') throw new UserError(`${account.name} is not a live account, so it does not need a change window.`);
+    const max = this.opts.policy.live.maxWindowHours;
+    const hours = Number(input.hours);
+    if (!Number.isInteger(hours) || hours < 1 || hours > max) throw new UserError(`A change window can last 1 to ${max} hours.`);
+    if (!sameName(String(input.confirmName ?? ''), account.name)) throw new UserError(`Type the account name exactly as shown (${account.name}) to open a change window.`);
+    const by = cleanText(input.by, 80) || 'person';
+    return this.lock.run(() => {
+      const current = this.control.load();
+      const now = this.now();
+      const window: ChangeWindow = { accountId: account.id, until: this.iso(now + hours * 3_600_000), openedAt: this.iso(now), openedBy: by, hours };
+      this.control.save({ ...current, windows: { ...(current.windows ?? {}), [account.id]: window } });
+      this.log('change_window_opened', by, undefined, { accountId: account.id, account: account.name, hours, until: window.until });
+      return window;
+    });
+  }
+
+  /** Human only: locks a live account again straight away. */
+  async closeChangeWindow(accountId: string, by: string): Promise<void> {
+    await this.lock.run(() => {
+      const current = this.control.load();
+      const w = current.windows?.[accountId];
+      if (!w) return;
+      const windows = { ...(current.windows ?? {}) };
+      delete windows[accountId];
+      this.control.save({ ...current, windows });
+      if (Date.parse(w.until) > this.now()) this.log('change_window_closed', cleanText(by, 80) || 'person', undefined, { accountId, early: true });
     });
   }
 
@@ -187,6 +265,15 @@ export class Engine {
       }
 
       if (this.killSwitchState().on) checks.push({ id: 'kill_switch', label: 'Changes are live', status: 'warn', detail: 'The kill switch is on. This can be approved but not applied until a person resumes changes.' });
+
+      const access = this.liveFor(account);
+      if (access.required) {
+        checks.push(
+          access.open
+            ? { id: 'live_access', label: 'Change window open for this live account', status: 'pass', detail: `A person opened a ${access.hours}-hour window. Changes are allowed until ${utcLabel(access.until!)}.` }
+            : { id: 'live_access', label: 'Change window open for this live account', status: 'warn', detail: 'This is a live Google Ads account and changes are off. It can be approved, but it cannot be applied until a person opens a change window in the approval console.' },
+        );
+      }
 
       const dry = await this.opts.backend.mutate(account.id, change, { validateOnly: true });
       checks.push(
@@ -313,6 +400,11 @@ export class Engine {
 
       if (this.killSwitchState().on) return refuse('Changes are paused by the kill switch. A person must resume changes in the approval console first.');
 
+      const accountNow = await this.opts.backend.getAccount(p.accountId);
+      if (!accountNow) return refuse(`Account ${p.accountId} is no longer available.`);
+      const access = this.liveFor(accountNow);
+      if (!access.open) return refuse(`${accountNow.name} is a live account and no change window is open. A person can open one in the approval console; then apply again.`);
+
       if (this.bindingOf(p) !== p.bindingHash || p.approval?.bindingHash !== p.bindingHash) {
         p.status = 'failed';
         p.error = 'The stored proposal no longer matches what was approved, so it was not applied.';
@@ -334,10 +426,8 @@ export class Engine {
         if (wait > 0) return refuse(`Cooldown: this target changed recently. Try again in about ${Math.ceil(wait / 60_000)} minutes.`);
       }
 
-      const account = await this.opts.backend.getAccount(p.accountId);
-      if (!account) return refuse(`Account ${p.accountId} is no longer available.`);
       const fresh = await evaluate(
-        { backend: this.opts.backend, accountId: p.accountId, policy: this.opts.policy, isRollback: Boolean(p.rollbackOf), currency: account.currency },
+        { backend: this.opts.backend, accountId: p.accountId, policy: this.opts.policy, isRollback: Boolean(p.rollbackOf), currency: accountNow.currency },
         p.change,
       );
 
@@ -352,7 +442,7 @@ export class Engine {
       const failing = fresh.checks.filter((c) => c.status === 'fail');
       if (failing.length) return refuse(`Policy re-check failed: ${failing.map((c) => `${c.label}. ${c.detail ?? ''}`.trim()).join(' ')}`);
 
-      const result = await this.opts.backend.mutate(p.accountId, p.change, { validateOnly: false });
+      const result = await this.opts.backend.mutate(p.accountId, p.change, { validateOnly: false, liveAccess: access.required && access.open });
       if (!result.ok) {
         p.status = 'failed';
         p.error = result.errors.join(' ') || 'The platform rejected the change.';
@@ -384,6 +474,28 @@ export class Engine {
       }
       this.log('verify_failed', p.appliedBy, id, { expected: p.after, observed });
       return { status: 'verify_failed', proposal: p, message: 'The change was sent but the account does not show the expected result. Check the account and consider an undo.' };
+    });
+  }
+
+  // ---------- independent checks ----------
+
+  /** Compares Google's own change history with this log. See witness.ts. */
+  async witness(accountId: string, days = 14): Promise<WitnessReport> {
+    await this.sweep();
+    return witnessCheck({
+      backend: this.opts.backend,
+      accountId,
+      days,
+      proposals: this.store.list(),
+      setupRuns: this.audit.readAll().filter((e) => e.type === 'setup_changes'),
+      now: this.now(),
+    });
+  }
+
+  /** Records changes made by npm run gads:setup, so the witness check knows they were expected. */
+  async recordSetup(input: { accountId: string; from: string; to: string; changes: number; by: string }): Promise<void> {
+    await this.lock.run(() => {
+      this.log('setup_changes', cleanText(input.by, 80) || 'setup script', undefined, { accountId: input.accountId, from: input.from, to: input.to, changes: input.changes });
     });
   }
 

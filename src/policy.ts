@@ -8,4 +8,5 @@ export const DEFAULT_POLICY: Policy = {
   negatives: { maxPerProposal: 20, maxConversionsBlockedPct: 20 },
   adCopy: { headlineMaxChars: 30, descriptionMaxChars: 90, minHeadlines: 3, maxHeadlines: 15, minDescriptions: 2, maxDescriptions: 4 },
   status: { allowPause: true, allowEnable: true },
+  live: { maxWindowHours: 8 },
 };

@@ -9,7 +9,6 @@ export { ServiceAccountAuth, readServiceAccountKey } from './auth.js';
 
 export type GoogleAdsStatus = 'off' | 'not_set_up' | 'ready' | 'error';
 
-const truthy = (v?: string) => ['1', 'true', 'yes', 'on'].includes((v ?? '').trim().toLowerCase());
 const falsy = (v?: string) => ['0', 'false', 'no', 'off'].includes((v ?? '').trim().toLowerCase());
 
 /**
@@ -37,8 +36,12 @@ export function loadGoogleAdsBackend(env: NodeJS.ProcessEnv = process.env): { ba
       developerToken: env.GOOGLE_ADS_DEVELOPER_TOKEN?.trim() || undefined,
       baseUrl: env.GOOGLE_ADS_API_BASE_URL?.trim() || undefined, // tests only
     });
-    const backend = new GoogleAdsBackend({ settings, client, allowLive: truthy(env.CAMPAIGN_OPS_GOOGLE_ADS_ALLOW_LIVE) });
-    return { backend, status: 'ready', message: `Google Ads connected: ${settings.accounts.map((a) => `${a.name} (${a.id}${a.testAccount ? ', test' : ''})`).join(', ')}.` };
+    const backend = new GoogleAdsBackend({ settings, client });
+    return {
+      backend,
+      status: 'ready',
+      message: `Google Ads connected: ${settings.accounts.map((a) => `${a.name} (${a.id}, ${a.testAccount ? 'test' : 'live, read-only until a change window is opened'})`).join(', ')}.`,
+    };
   } catch (e) {
     return { status: 'error', message: `Google Ads not connected: ${(e as Error).message}` };
   }

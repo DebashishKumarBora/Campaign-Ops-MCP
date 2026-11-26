@@ -27,6 +27,13 @@ export interface MutateResponse {
   results: Array<{ resourceName?: string }>;
 }
 
+/** login-customer-id for one call: a customer ID, or null to send none. Omit to use the client's default. */
+export interface CallOptions {
+  login?: string | null;
+}
+
+const loginOf = (opts: CallOptions): string | null | undefined => (opts.login === undefined ? undefined : opts.login === null ? null : digits(opts.login));
+
 /** Google did not process the request: safe to retry anything. */
 const RETRY_ALWAYS = new Set([429, 503]);
 /** Might have been processed: retry reads only, never writes. */
@@ -52,13 +59,13 @@ export class GoogleAdsClient {
   }
 
   /** Runs a Google Ads Query Language search and returns every row (pages through results). */
-  async search<T = Record<string, any>>(customerId: string, query: string): Promise<T[]> {
+  async search<T = Record<string, any>>(customerId: string, query: string, opts: CallOptions = {}): Promise<T[]> {
     const rows: T[] = [];
     let pageToken: string | undefined;
     for (let page = 0; page < 100; page++) {
       const body: Record<string, unknown> = { query: query.replace(/\s+/g, ' ').trim() };
       if (pageToken) body.page_token = pageToken;
-      const res = (await this.request('POST', `customers/${digits(customerId)}/googleAds:search`, body, undefined, true)) as { results?: T[]; nextPageToken?: string };
+      const res = (await this.request('POST', `customers/${digits(customerId)}/googleAds:search`, body, loginOf(opts), true)) as { results?: T[]; nextPageToken?: string };
       rows.push(...(res.results ?? []));
       pageToken = res.nextPageToken;
       if (!pageToken) break;
@@ -71,10 +78,10 @@ export class GoogleAdsClient {
    * example mutate(id, 'campaignBudgets', [...]). With validateOnly Google
    * checks everything and writes nothing.
    */
-  async mutate(customerId: string, resource: string, operations: unknown[], opts: { validateOnly?: boolean } = {}): Promise<MutateResponse> {
+  async mutate(customerId: string, resource: string, operations: unknown[], opts: { validateOnly?: boolean } & CallOptions = {}): Promise<MutateResponse> {
     const body: Record<string, unknown> = { operations };
     if (opts.validateOnly) body.validateOnly = true;
-    const res = (await this.request('POST', `customers/${digits(customerId)}/${resource}:mutate`, body)) as Partial<MutateResponse>;
+    const res = (await this.request('POST', `customers/${digits(customerId)}/${resource}:mutate`, body, loginOf(opts))) as Partial<MutateResponse>;
     return { results: res.results ?? [] };
   }
 

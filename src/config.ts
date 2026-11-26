@@ -31,6 +31,7 @@ const PolicySchema = z.object({
     maxDescriptions: num(1, 4),
   }),
   status: z.object({ allowPause: z.boolean(), allowEnable: z.boolean() }),
+  live: z.object({ maxWindowHours: num(1, 72) }),
 });
 
 export interface AppConfig {

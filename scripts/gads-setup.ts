@@ -11,6 +11,7 @@ import { GoogleAdsApiError, explain } from '../src/backends/googleAds/errors.js'
 import { dashed, saveSettings, type GoogleAdsAccountSetting } from '../src/backends/googleAds/settings.js';
 import { seedAccount } from '../src/backends/googleAds/seeder.js';
 import { sleep } from '../src/util/fsx.js';
+import { createApp } from '../src/app.js';
 import { connect, listClientAccounts, parseArgs, run, say, Stop, type Connection } from './gads-common.js';
 
 const ACCOUNT_NAME = 'Demo Apartments';
@@ -94,7 +95,17 @@ await run(async () => {
 
   // Build the sample campaigns.
   say.step(args.fresh ? 'Rebuilding the sample campaigns' : 'Building the sample campaigns');
+  const seedFrom = new Date().toISOString();
   const report = await seedAccount(conn.client, id, { fresh: args.fresh, log: (l) => say.line(l) });
+  const seedTo = new Date().toISOString();
+  if (report.created.length || report.removed.length) {
+    // Tell the audit log, so the witness check knows these robot changes were the setup, not a stray use of the key.
+    try {
+      await createApp().engine.recordSetup({ accountId: id, from: seedFrom, to: seedTo, changes: report.created.length + report.removed.length, by: 'npm run gads:setup' });
+    } catch (e) {
+      say.warn(`Could not note the setup in the audit log: ${(e as Error).message}`);
+    }
+  }
   for (const w of report.warnings) say.warn(w);
   if (report.created.length) say.ok(`${report.created.length} campaign${report.created.length === 1 ? '' : 's'} created`);
   if (report.skipped.length && !report.created.length) say.ok('The sample campaigns were already there. Add --fresh to rebuild them.');

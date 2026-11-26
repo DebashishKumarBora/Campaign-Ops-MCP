@@ -1,5 +1,5 @@
-import type { AdsBackend, MutateResult } from './backend.js';
-import type { Account, Ad, BackendMode, Campaign, Change, DailyMetric, NegativeKeyword, SearchTermRow } from '../types.js';
+import type { AdsBackend, MutateOptions, MutateResult } from './backend.js';
+import type { Account, Ad, BackendMode, Campaign, Change, ChangeEvent, DailyMetric, NegativeKeyword, SearchTermRow } from '../types.js';
 import { UserError } from '../types.js';
 
 /**
@@ -88,9 +88,27 @@ export class RouterBackend implements AdsBackend {
     return (await this.need(accountId)).listNegatives(accountId, campaignId);
   }
 
-  async mutate(accountId: string, change: Change, opts: { validateOnly: boolean }): Promise<MutateResult> {
+  async mutate(accountId: string, change: Change, opts: MutateOptions): Promise<MutateResult> {
     const b = await this.route(accountId);
     if (!b) return { ok: false, errors: [`Unknown account ${accountId}`] };
     return b.mutate(accountId, change, opts);
+  }
+
+  /** Undefined when the owning backend keeps no change history, so callers can say so. */
+  async getChangeHistory(accountId: string, opts: { days: number }): Promise<ChangeEvent[]> {
+    const b = await this.need(accountId);
+    if (!b.getChangeHistory) throw new UserError('This account has no change history to check against.');
+    return b.getChangeHistory(accountId, opts);
+  }
+
+  async changeHistoryStart(accountId: string): Promise<string | undefined> {
+    const b = await this.route(accountId);
+    return b?.changeHistoryStart ? b.changeHistoryStart(accountId) : undefined;
+  }
+
+  /** True when the backend that owns the account can report its change history. */
+  async hasChangeHistory(accountId: string): Promise<boolean> {
+    const b = await this.route(accountId);
+    return Boolean(b?.getChangeHistory);
   }
 }

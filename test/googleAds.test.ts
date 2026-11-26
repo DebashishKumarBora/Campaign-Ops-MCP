@@ -155,7 +155,7 @@ describe('Google Ads backend', () => {
     assert.match(report.notes[0], /simulated/);
   });
 
-  test('refuses every change when Google says the account is not a test account', async () => {
+  test('refuses every change, even a dry run, when an account saved as a test account is live', async () => {
     const { fake, google } = await seeded();
     // Google answers the "is this a test account?" read with false (omitted, as proto3 JSON does)
     const real = fake.handle.bind(fake);
@@ -165,6 +165,7 @@ describe('Google Ads backend', () => {
     const res = await google.mutate(ACCOUNT, { type: 'set_campaign_status', campaignId: campaigns[0].id, newStatus: 'PAUSED' }, { validateOnly: true });
     assert.equal(res.ok, false);
     assert.match(res.errors[0], /live Google Ads account, not a test account/);
+    assert.match(res.errors[0], /npm run gads:add/);
     assert.equal(fake.mutations().length, before);
   });
 });
@@ -327,6 +328,11 @@ describe('npm run gads:check and gads:setup', () => {
       assert.equal(saved.managerId, '724-800-0350');
       assert.equal(saved.accounts.length, 1);
       assert.equal(saved.accounts[0].testAccount, true);
+      const audit = fs.readFileSync(path.join(data, 'audit.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+      const setupEntry = audit.find((e) => e.type === 'setup_changes');
+      assert.ok(setupEntry, 'the setup run is noted in the audit log for the witness check');
+      assert.equal(setupEntry.details.accountId, saved.accounts[0].id);
+      assert.equal(setupEntry.details.changes, 6, 'six campaigns built');
 
       const again = await runScript('gads-setup', [], env);
       assert.equal(again.code, 0, again.out);

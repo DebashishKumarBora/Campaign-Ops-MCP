@@ -5,6 +5,9 @@ import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { createMcpServer } from '../src/server.js';
+import { loadConfig } from '../src/config.js';
 import { projectRoot } from '../src/util/root.js';
 import { makeRig, tempDir, PERSON } from './helpers.js';
 
@@ -58,7 +61,7 @@ test('MCP: tools, diagnostics, proposal, and approval from another process', asy
   const client = await connect(dir);
   try {
     const tools = (await client.listTools()).tools.map((t) => t.name).sort();
-    assert.deepEqual(tools, ['apply_change', 'check_ad_copy', 'get_account_overview', 'get_ads', 'get_audit_log', 'get_policy', 'get_proposal', 'get_search_terms', 'list_accounts', 'list_proposals', 'propose_change', 'request_rollback', 'run_diagnostics']);
+    assert.deepEqual(tools, ['apply_change', 'check_ad_copy', 'check_pulse', 'get_account_overview', 'get_ads', 'get_audit_log', 'get_policy', 'get_proposal', 'get_search_terms', 'list_accounts', 'list_proposals', 'propose_change', 'request_rollback', 'run_diagnostics', 'verify_with_google']);
     const apply = (await client.listTools()).tools.find((t) => t.name === 'apply_change')!;
     assert.equal(apply.annotations?.destructiveHint, true);
 
@@ -145,5 +148,74 @@ test('MCP: wait_seconds picks up a console approval while waiting', async () => 
     assert.ok(Date.now() - started < 8000, 'returns soon after approval, not at the timeout');
   } finally {
     await client.close();
+  }
+});
+
+function text(result: unknown): string {
+  return ((result as { content: Array<{ text?: string }> }).content ?? []).map((c) => c.text ?? '').join('\n');
+}
+
+test('MCP: Pulse, the witness check, the stopgap pause and live-account rules', async () => {
+  const client = await connect(freshDir());
+  try {
+    const pulse = data(await client.callTool({ name: 'check_pulse', arguments: { account_id: ACCOUNT } }));
+    assert.equal(pulse.alarms.length, 1);
+    assert.equal(pulse.alarms[0].kind, 'tracking_outage');
+
+    const diag = data(await client.callTool({ name: 'run_diagnostics', arguments: { account_id: ACCOUNT } }));
+    assert.equal(diag.findings.length, 5);
+    assert.equal(diag.pulse_alarms.alarms.length, 1);
+    const ad = diag.findings.find((f: { kind: string }) => f.kind === 'ad_copy_compliance');
+    assert.deepEqual(ad.stopgap_change, { type: 'set_ad_status', ad_id: 'a-3011', new_status: 'PAUSED' });
+    assert.ok(ad.stopgap_reason.length > 20);
+
+    const pause = data(await client.callTool({ name: 'propose_change', arguments: { account_id: ACCOUNT, change: ad.stopgap_change, reason: ad.stopgap_reason } }));
+    assert.equal(pause.status, 'pending_approval');
+    assert.equal(pause.type, 'Ad status change');
+    assert.match(pause.summary, /^Pause ad a-3011 in Ashgrove Commons/);
+    assert.deepEqual(pause.diff, [{ field: 'Ad a-3011 status', before: 'Enabled', after: 'Paused' }]);
+
+    const witness = data(await client.callTool({ name: 'verify_with_google', arguments: { account_id: ACCOUNT } }));
+    assert.equal(witness.verdict, 'clean');
+    assert.equal(witness.source, 'sandbox_change_history');
+    assert.equal(witness.outside_change_count, 2);
+
+    const accounts = data(await client.callTool({ name: 'list_accounts', arguments: {} }));
+    assert.equal(accounts.accounts[0].changes, 'allowed with approval');
+    const policy = data(await client.callTool({ name: 'get_policy', arguments: {} }));
+    assert.match(policy.live_accounts, /change window/);
+    const tools = (await client.listTools()).tools.map((t) => t.name);
+    assert.ok(!tools.some((t) => /window/.test(t)), 'no tool can open a change window');
+  } finally {
+    await client.close();
+  }
+});
+
+test('MCP: approve links open the console on the exact proposal', async () => {
+  const rig = makeRig({ realTime: true });
+  const config = loadConfig({ ...process.env, CAMPAIGN_OPS_DATA_DIR: rig.dir, CAMPAIGN_OPS_SCOPE: 'execute', CAMPAIGN_OPS_POLICY_FILE: 'no-such-policy-file.json', CAMPAIGN_OPS_GOOGLE_ADS: 'off' });
+  const server = createMcpServer({ engine: rig.engine, backend: rig.backend, config, version: 'test', consoleUrl: () => 'http://127.0.0.1:4848/' });
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverSide);
+  const client = new Client({ name: 'campaign-ops-test', version: '1.0.0' });
+  await client.connect(clientSide);
+  try {
+    const res = await client.callTool({ name: 'propose_change', arguments: { account_id: ACCOUNT, change: { type: 'set_campaign_budget', campaign_id: 'c-202', new_daily_budget: 46 }, reason: 'Best cost per lead and limited by budget.' } });
+    const p = data(res);
+    assert.equal(p.approve_link, `http://127.0.0.1:4848/#p=${p.id}`);
+    assert.match(text(res), new RegExp(`Approve or reject it here: http://127\\.0\\.0\\.1:4848/#p=${p.id}`));
+    assert.ok(!text(res).includes(config.consoleToken), 'the link never carries the console key');
+
+    const waiting = data(await client.callTool({ name: 'apply_change', arguments: { proposal_id: p.id } }));
+    assert.equal(waiting.status, 'awaiting_approval');
+    assert.equal(waiting.approve_link, `http://127.0.0.1:4848/#p=${p.id}`);
+
+    await rig.engine.approve(p.id, { by: PERSON, channel: 'console' });
+    const applied = data(await client.callTool({ name: 'apply_change', arguments: { proposal_id: p.id } }));
+    assert.equal(applied.status, 'applied');
+    assert.equal(applied.proposal.approve_link, undefined, 'no link once nothing is waiting');
+  } finally {
+    await client.close();
+    rig.cleanup();
   }
 });
